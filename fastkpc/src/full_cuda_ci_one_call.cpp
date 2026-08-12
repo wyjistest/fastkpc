@@ -72,6 +72,28 @@ double elapsed_ms(
     std::chrono::steady_clock::now() - start).count();
 }
 
+bool compare_shadow_values(
+    const std::vector<double>& reference,
+    const std::vector<double>& candidate,
+    double* maximum_absolute_error) {
+  require(maximum_absolute_error != nullptr &&
+            reference.size() == candidate.size(),
+          "exact-primary coefficient parity shadow shape changed");
+  bool bitwise_equal = true;
+  for (std::size_t index = 0U; index < reference.size(); ++index) {
+    const double left = reference[index];
+    const double right = candidate[index];
+    if (std::memcmp(&left, &right, sizeof(double)) != 0) {
+      bitwise_equal = false;
+    }
+    const double error = std::abs(left - right);
+    require(std::isfinite(error),
+            "exact-primary coefficient parity observed a non-finite value");
+    *maximum_absolute_error = std::max(*maximum_absolute_error, error);
+  }
+  return bitwise_equal;
+}
+
 int decomposition_trace_capacity_from_environment() {
   const char* raw = std::getenv(
     "FASTKPC_PHASE10_DECOMPOSITION_TRACE_CAPACITY");
@@ -143,6 +165,40 @@ bool dcc_gamma_exact_primary_optimizer_policy() {
   if (std::string(raw) == "0") return false;
   throw std::runtime_error(
     "FASTKPC_DCC_GAMMA_EXACT_PRIMARY_OPTIMIZER must be 0 or 1");
+}
+
+bool dcc_gamma_exact_primary_fixed_reuse_key_diagnostic_policy() {
+  const char* raw = std::getenv(
+    "FASTKPC_DIAG_EXACT_PRIMARY_FIXED_REUSE_KEYS");
+  if (raw == nullptr || raw[0] == '\0' || std::string(raw) == "0") {
+    return false;
+  }
+  require(
+    std::string(raw) == "1",
+    "exact-primary/fixed reuse key diagnostic must be 0 or 1");
+  return true;
+}
+
+bool dcc_gamma_exact_primary_fixed_reuse_policy() {
+  const char* raw = std::getenv(
+    "FASTKPC_DCC_GAMMA_EXACT_PRIMARY_FIXED_REUSE");
+  if (raw == nullptr || raw[0] == '\0' || std::string(raw) == "1") {
+    return true;
+  }
+  if (std::string(raw) == "0") return false;
+  throw std::runtime_error(
+    "FASTKPC_DCC_GAMMA_EXACT_PRIMARY_FIXED_REUSE must be 0 or 1");
+}
+
+bool exact_primary_coefficient_parity_diagnostic_policy() {
+  const char* raw = std::getenv(
+    "FASTKPC_DIAG_EXACT_PRIMARY_COEFFICIENT_PARITY");
+  if (raw == nullptr || raw[0] == '\0' || std::string(raw) == "0") {
+    return false;
+  }
+  require(std::string(raw) == "1",
+          "exact-primary coefficient parity diagnostic must be 0 or 1");
+  return true;
 }
 
 int dcc_gamma_legacy_component_eig_lane_policy() {
@@ -997,6 +1053,450 @@ struct LegacyComponentWaveGroupTraceRow {
   double dcov_host_ms = 0.0;
 };
 
+struct ExactPrimaryFixedReuseKeyRecord {
+  int level = -1;
+  int producer_window = 0;
+  int first_consumer_batch = 0;
+  int last_consumer_batch = 0;
+  std::uint64_t request_count = 0U;
+};
+
+void check_one_call_cuda(cudaError_t status, const std::string& stage) {
+  if (status != cudaSuccess) {
+    throw std::runtime_error(stage + ": " + cudaGetErrorString(status));
+  }
+}
+
+// Level-scoped storage for exact-primary coefficients. Optimizer output slots
+// are copied once and released immediately. CI consumers gather requested
+// columns into one reusable device staging buffer before reproducing the exact
+// fixed-evaluator fitted/residual materialization.
+class ExactPrimaryCoefficientArena {
+ public:
+  ExactPrimaryCoefficientArena(bool enabled, int n, int max_target_count)
+      : enabled_(enabled), n_(n), max_target_count_(max_target_count) {
+    if (!enabled_) return;
+    require(n_ > 0 && max_target_count_ > 0,
+            "exact-primary coefficient arena dimensions are invalid");
+    check_one_call_cuda(cudaGetDevice(&device_id_),
+                        "capture exact-primary coefficient arena device");
+    try {
+      check_one_call_cuda(
+        cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking),
+        "create exact-primary coefficient arena stream");
+      check_one_call_cuda(
+        cudaEventCreateWithFlags(&completion_event_, cudaEventDisableTiming),
+        "create exact-primary coefficient arena event");
+      const std::size_t coefficient_staging_values =
+        checked_coefficient_values(
+          kMultiPenaltyGcvDefaultKpcMaximumCoefficientDim,
+          max_target_count_);
+      check_one_call_cuda(
+        cudaMalloc(reinterpret_cast<void**>(&coefficient_staging_),
+                   coefficient_staging_values * sizeof(double)),
+        "allocate exact-primary coefficient arena staging");
+      allocation_count_ += 1U;
+      current_device_bytes_ = coefficient_staging_values * sizeof(double);
+      peak_device_bytes_ = current_device_bytes_;
+    } catch (...) {
+      close_noexcept();
+      throw;
+    }
+  }
+
+  ~ExactPrimaryCoefficientArena() { close_noexcept(); }
+  ExactPrimaryCoefficientArena(const ExactPrimaryCoefficientArena&) = delete;
+  ExactPrimaryCoefficientArena& operator=(
+      const ExactPrimaryCoefficientArena&) = delete;
+
+  bool enabled() const { return enabled_; }
+
+  void begin_level(int level) {
+    if (!enabled_) return;
+    require(level >= 0 && level < 65 && current_level_ == -1,
+            "exact-primary coefficient arena level lifecycle changed");
+    select_device();
+    check_one_call_cuda(cudaStreamSynchronize(stream_),
+                        "synchronize exact-primary arena before level");
+    entries_.clear();
+    live_target_count_ = 0U;
+    coefficient_size_values_ = 0U;
+    current_level_ = level;
+    level_count_ += 1U;
+  }
+
+  void enqueue_store(
+      int level,
+      const std::vector<std::string>& base_target_keys,
+      const std::vector<std::string>& exact_residual_keys,
+      const std::shared_ptr<MultiPenaltyGcvCapacityResidualBatch>& residual) {
+    if (!enabled_) return;
+    const auto started = std::chrono::steady_clock::now();
+    require(level == current_level_ && residual &&
+              !base_target_keys.empty() &&
+              base_target_keys.size() == exact_residual_keys.size(),
+            "exact-primary coefficient arena store request is malformed");
+    const MultiPenaltyGcvCudaResidualInfo info =
+      multi_penalty_gcv_capacity_residual_info(residual);
+    const MultiPenaltyGcvCudaResidualConsumerView view =
+      acquire_multi_penalty_gcv_capacity_residual_consumer_view(residual);
+    const std::size_t target_count = exact_residual_keys.size();
+    require(info.n == n_ && info.target_count ==
+              static_cast<int>(target_count) &&
+              info.device_id == device_id_ && info.device_resident &&
+              !info.released && !info.fixed_sp_evaluation &&
+              info.target_keys == base_target_keys &&
+              info.optimizer_status.size() == target_count &&
+              info.solver_info.size() == target_count &&
+              info.decomposition_route.size() == target_count &&
+              info.numerical_rank.size() == target_count &&
+              view.coefficients != nullptr &&
+              view.n == n_ &&
+              view.coefficient_dim == info.coefficient_dim &&
+              view.target_count == static_cast<int>(target_count) &&
+              view.device_id == device_id_ &&
+              view.target_keys == base_target_keys &&
+              view.producer_completion_event != nullptr,
+            "exact-primary coefficient arena producer identity changed");
+    require(
+      std::all_of(info.optimizer_status.begin(), info.optimizer_status.end(),
+                  [](int value) { return value == 0; }) &&
+        std::all_of(info.solver_info.begin(), info.solver_info.end(),
+                    [](int value) { return value == 0; }) &&
+        std::all_of(
+          info.decomposition_route.begin(), info.decomposition_route.end(),
+          [](int value) {
+            return value == kMultiPenaltyGcvDecompositionStableSvd;
+          }) &&
+        std::all_of(info.numerical_rank.begin(), info.numerical_rank.end(),
+                    [](int value) { return value > 0; }),
+      "exact-primary coefficient arena producer metadata failed closed");
+
+    select_device();
+    const std::size_t coefficient_count = checked_coefficient_values(
+      info.coefficient_dim, target_count);
+    ensure_coefficient_storage(
+      coefficient_size_values_ + coefficient_count);
+    check_one_call_cuda(
+      cudaStreamWaitEvent(stream_, view.producer_completion_event, 0),
+      "wait for exact-primary coefficient producer before detach");
+    check_one_call_cuda(
+      cudaMemcpyAsync(
+        coefficient_storage_ + coefficient_size_values_, view.coefficients,
+        coefficient_count * sizeof(double), cudaMemcpyDeviceToDevice,
+        stream_),
+      "detach exact-primary coefficient batch into arena");
+    for (std::size_t target = 0U; target < target_count; ++target) {
+      Entry entry;
+      entry.level = level;
+      entry.coefficient_offset = coefficient_size_values_ +
+        target * static_cast<std::size_t>(info.coefficient_dim);
+      entry.coefficient_dim = info.coefficient_dim;
+      entry.solver_info = info.solver_info[target];
+      entry.decomposition_route = info.decomposition_route[target];
+      entry.numerical_rank = info.numerical_rank[target];
+      const auto inserted = entries_.emplace(
+        exact_residual_keys[target], entry);
+      require(inserted.second,
+              "exact-primary coefficient arena observed a duplicate key");
+    }
+    live_target_count_ += target_count;
+    coefficient_size_values_ += coefficient_count;
+    peak_live_targets_ = std::max(
+      peak_live_targets_, live_target_count_);
+    store_batch_count_ += 1U;
+    store_target_count_ += target_count;
+    coefficient_store_d2d_bytes_ += coefficient_count * sizeof(double);
+    store_host_ms_ += elapsed_ms(started);
+  }
+
+  void finish_store_window() {
+    if (!enabled_) return;
+    const auto started = std::chrono::steady_clock::now();
+    select_device();
+    check_one_call_cuda(cudaStreamSynchronize(stream_),
+                        "finish exact-primary coefficient arena store window");
+    store_window_sync_count_ += 1U;
+    store_host_ms_ += elapsed_ms(started);
+  }
+
+  bool contains_all(
+      int level, const std::vector<std::string>& exact_residual_keys) const {
+    if (!enabled_ || level != current_level_ || exact_residual_keys.empty()) {
+      return false;
+    }
+    return std::all_of(
+      exact_residual_keys.begin(), exact_residual_keys.end(),
+      [this, level](const std::string& key) {
+        const auto found = entries_.find(key);
+        return found != entries_.end() && found->second.level == level;
+      });
+  }
+
+  MultiPenaltyGcvCudaCoefficientConsumerView gather_coefficients(
+      int level,
+      int coefficient_dim,
+      const std::vector<std::string>& exact_residual_keys) {
+    const auto started = std::chrono::steady_clock::now();
+    require(enabled_ && level == current_level_ && coefficient_dim > 0 &&
+              coefficient_dim <=
+                kMultiPenaltyGcvDefaultKpcMaximumCoefficientDim &&
+              !exact_residual_keys.empty() &&
+              exact_residual_keys.size() <=
+                static_cast<std::size_t>(max_target_count_),
+            "exact-primary coefficient arena gather request is malformed");
+    select_device();
+    MultiPenaltyGcvCudaCoefficientConsumerView view;
+    view.coefficients = coefficient_staging_;
+    view.coefficient_dim = coefficient_dim;
+    view.target_count = static_cast<int>(exact_residual_keys.size());
+    view.device_id = device_id_;
+    view.producer_stream = stream_;
+    view.producer_completion_event = completion_event_;
+    view.target_keys = exact_residual_keys;
+    view.solver_info.reserve(exact_residual_keys.size());
+    view.decomposition_route.reserve(exact_residual_keys.size());
+    view.numerical_rank.reserve(exact_residual_keys.size());
+    for (std::size_t target = 0U; target < exact_residual_keys.size();
+         ++target) {
+      const auto found = entries_.find(exact_residual_keys[target]);
+      require(found != entries_.end() && found->second.level == level &&
+                found->second.coefficient_dim == coefficient_dim &&
+                found->second.solver_info == 0 &&
+                found->second.decomposition_route ==
+                  kMultiPenaltyGcvDecompositionStableSvd &&
+                found->second.numerical_rank > 0,
+              "exact-primary coefficient arena gather identity failed closed");
+      check_one_call_cuda(
+        cudaMemcpyAsync(
+          coefficient_staging_ +
+            target * static_cast<std::size_t>(coefficient_dim),
+          coefficient_storage_ + found->second.coefficient_offset,
+          static_cast<std::size_t>(coefficient_dim) * sizeof(double),
+          cudaMemcpyDeviceToDevice, stream_),
+        "gather exact-primary coefficient from arena");
+      view.solver_info.push_back(found->second.solver_info);
+      view.decomposition_route.push_back(found->second.decomposition_route);
+      view.numerical_rank.push_back(found->second.numerical_rank);
+    }
+    check_one_call_cuda(
+      cudaEventRecord(completion_event_, stream_),
+      "record exact-primary coefficient arena gather completion");
+    coefficient_gather_batch_count_ += 1U;
+    coefficient_gather_target_count_ += exact_residual_keys.size();
+    coefficient_gather_copy_count_ += exact_residual_keys.size();
+    coefficient_gather_d2d_bytes_ += checked_coefficient_values(
+      coefficient_dim, exact_residual_keys.size()) * sizeof(double);
+    coefficient_gather_host_ms_ += elapsed_ms(started);
+    return view;
+  }
+
+  void finish_level(int level) {
+    if (!enabled_) return;
+    require(level == current_level_,
+            "exact-primary coefficient arena finish level changed");
+    select_device();
+    check_one_call_cuda(cudaStreamSynchronize(stream_),
+                        "finish exact-primary coefficient arena level");
+    entries_.clear();
+    live_target_count_ = 0U;
+    coefficient_size_values_ = 0U;
+    current_level_ = -1;
+  }
+
+  void synchronize_noexcept() noexcept {
+    if (!enabled_ || stream_ == nullptr) return;
+    cudaSetDevice(device_id_);
+    cudaStreamSynchronize(stream_);
+  }
+
+  void close() {
+    if (!enabled_ || closed_) return;
+    select_device();
+    check_one_call_cuda(cudaStreamSynchronize(stream_),
+                        "synchronize exact-primary coefficient arena close");
+    if (coefficient_storage_ != nullptr) {
+      check_one_call_cuda(
+        cudaFree(coefficient_storage_),
+        "free exact-primary coefficient arena storage");
+      coefficient_storage_ = nullptr;
+      free_count_ += 1U;
+    }
+    if (coefficient_staging_ != nullptr) {
+      check_one_call_cuda(
+        cudaFree(coefficient_staging_),
+        "free exact-primary coefficient arena staging");
+      coefficient_staging_ = nullptr;
+      free_count_ += 1U;
+    }
+    current_device_bytes_ = 0U;
+    if (completion_event_ != nullptr) {
+      check_one_call_cuda(cudaEventDestroy(completion_event_),
+                          "destroy exact-primary coefficient arena event");
+      completion_event_ = nullptr;
+    }
+    if (stream_ != nullptr) {
+      check_one_call_cuda(cudaStreamDestroy(stream_),
+                          "destroy exact-primary coefficient arena stream");
+      stream_ = nullptr;
+    }
+    entries_.clear();
+    current_level_ = -1;
+    closed_ = true;
+  }
+
+  std::uint64_t level_count() const { return level_count_; }
+  std::uint64_t store_batch_count() const { return store_batch_count_; }
+  std::uint64_t store_target_count() const { return store_target_count_; }
+  std::uint64_t store_window_sync_count() const {
+    return store_window_sync_count_;
+  }
+  std::size_t peak_live_targets() const { return peak_live_targets_; }
+  std::size_t coefficient_store_d2d_bytes() const {
+    return coefficient_store_d2d_bytes_;
+  }
+  std::uint64_t coefficient_gather_copy_count() const {
+    return coefficient_gather_copy_count_;
+  }
+  std::size_t coefficient_gather_d2d_bytes() const {
+    return coefficient_gather_d2d_bytes_;
+  }
+  double coefficient_gather_host_ms() const {
+    return coefficient_gather_host_ms_;
+  }
+  std::size_t peak_device_bytes() const { return peak_device_bytes_; }
+  std::uint64_t allocation_count() const { return allocation_count_; }
+  std::uint64_t free_count() const { return free_count_; }
+  std::size_t current_device_bytes() const { return current_device_bytes_; }
+  double store_host_ms() const { return store_host_ms_; }
+
+ private:
+  struct Entry {
+    int level = -1;
+    std::size_t coefficient_offset = 0U;
+    int coefficient_dim = 0;
+    int solver_info = -1;
+    int decomposition_route = 0;
+    int numerical_rank = 0;
+  };
+
+  std::size_t checked_coefficient_values(
+      int coefficient_dim, std::size_t target_count) const {
+    require(coefficient_dim > 0 &&
+              target_count <=
+                std::numeric_limits<std::size_t>::max() /
+                  static_cast<std::size_t>(coefficient_dim),
+            "exact-primary coefficient arena size overflow");
+    return static_cast<std::size_t>(coefficient_dim) * target_count;
+  }
+
+  void select_device() const {
+    check_one_call_cuda(cudaSetDevice(device_id_),
+                        "select exact-primary coefficient arena device");
+  }
+
+  void ensure_coefficient_storage(std::size_t required_values) {
+    if (required_values <= coefficient_capacity_values_) return;
+    std::size_t new_capacity = std::max<std::size_t>(
+      16384U, coefficient_capacity_values_);
+    while (new_capacity < required_values) {
+      require(new_capacity <=
+                std::numeric_limits<std::size_t>::max() / 2U,
+              "exact-primary coefficient arena capacity overflow");
+      new_capacity *= 2U;
+    }
+    double* replacement = nullptr;
+    const std::size_t replacement_bytes = new_capacity * sizeof(double);
+    check_one_call_cuda(
+      cudaMalloc(reinterpret_cast<void**>(&replacement), replacement_bytes),
+      "grow exact-primary coefficient arena storage");
+    allocation_count_ += 1U;
+    if (coefficient_storage_ != nullptr) {
+      if (coefficient_size_values_ > 0U) {
+        check_one_call_cuda(
+          cudaMemcpyAsync(
+            replacement, coefficient_storage_,
+            coefficient_size_values_ * sizeof(double),
+            cudaMemcpyDeviceToDevice, stream_),
+          "preserve exact-primary coefficient arena during growth");
+        check_one_call_cuda(
+          cudaStreamSynchronize(stream_),
+          "synchronize exact-primary coefficient arena growth");
+      }
+      check_one_call_cuda(
+        cudaFree(coefficient_storage_),
+        "free prior exact-primary coefficient arena storage");
+      free_count_ += 1U;
+    }
+    coefficient_storage_ = replacement;
+    coefficient_capacity_values_ = new_capacity;
+    current_device_bytes_ = replacement_bytes +
+      checked_coefficient_values(
+        kMultiPenaltyGcvDefaultKpcMaximumCoefficientDim,
+        max_target_count_) * sizeof(double);
+    peak_device_bytes_ = std::max(peak_device_bytes_, current_device_bytes_);
+  }
+
+  void close_noexcept() noexcept {
+    if (!enabled_ || closed_) return;
+    cudaSetDevice(device_id_);
+    if (stream_ != nullptr) cudaStreamSynchronize(stream_);
+    if (coefficient_storage_ != nullptr) {
+      cudaFree(coefficient_storage_);
+      coefficient_storage_ = nullptr;
+      free_count_ += 1U;
+    }
+    if (coefficient_staging_ != nullptr) {
+      cudaFree(coefficient_staging_);
+      coefficient_staging_ = nullptr;
+      free_count_ += 1U;
+    }
+    if (completion_event_ != nullptr) {
+      cudaEventDestroy(completion_event_);
+      completion_event_ = nullptr;
+    }
+    if (stream_ != nullptr) {
+      cudaStreamDestroy(stream_);
+      stream_ = nullptr;
+    }
+    current_device_bytes_ = 0U;
+    entries_.clear();
+    current_level_ = -1;
+    closed_ = true;
+  }
+
+  bool enabled_ = false;
+  bool closed_ = false;
+  int n_ = 0;
+  int max_target_count_ = 0;
+  int device_id_ = -1;
+  int current_level_ = -1;
+  cudaStream_t stream_ = nullptr;
+  cudaEvent_t completion_event_ = nullptr;
+  double* coefficient_storage_ = nullptr;
+  double* coefficient_staging_ = nullptr;
+  std::size_t live_target_count_ = 0U;
+  std::size_t coefficient_size_values_ = 0U;
+  std::size_t coefficient_capacity_values_ = 0U;
+  std::unordered_map<std::string, Entry> entries_;
+  std::uint64_t level_count_ = 0U;
+  std::uint64_t store_batch_count_ = 0U;
+  std::uint64_t store_target_count_ = 0U;
+  std::uint64_t store_window_sync_count_ = 0U;
+  std::size_t peak_live_targets_ = 0U;
+  std::size_t coefficient_store_d2d_bytes_ = 0U;
+  std::uint64_t coefficient_gather_batch_count_ = 0U;
+  std::uint64_t coefficient_gather_target_count_ = 0U;
+  std::uint64_t coefficient_gather_copy_count_ = 0U;
+  std::size_t coefficient_gather_d2d_bytes_ = 0U;
+  std::size_t current_device_bytes_ = 0U;
+  std::size_t peak_device_bytes_ = 0U;
+  std::uint64_t allocation_count_ = 0U;
+  std::uint64_t free_count_ = 0U;
+  double store_host_ms_ = 0.0;
+  double coefficient_gather_host_ms_ = 0.0;
+};
+
 struct OneCallDiagnostics {
   std::unordered_set<std::string> physical_prepared_keys;
   std::unordered_set<std::string> consumed_prepared_keys;
@@ -1008,6 +1508,50 @@ struct OneCallDiagnostics {
   std::vector<LegacyComponentWaveGroupTraceRow>
     legacy_component_wave_group_trace;
   bool dcc_gamma_exact_primary_optimizer_requested = false;
+  bool exact_primary_fixed_reuse_requested = false;
+  bool exact_primary_coefficient_parity_diagnostic_enabled = false;
+  int exact_primary_coefficient_parity_batch_count = 0;
+  int exact_primary_coefficient_parity_coefficient_mismatch_batch_count = 0;
+  int exact_primary_coefficient_parity_fitted_mismatch_batch_count = 0;
+  int exact_primary_coefficient_parity_residual_mismatch_batch_count = 0;
+  double exact_primary_coefficient_parity_max_coefficient_error = 0.0;
+  double exact_primary_coefficient_parity_max_fitted_error = 0.0;
+  double exact_primary_coefficient_parity_max_residual_error = 0.0;
+  int exact_primary_fixed_reuse_hit_batch_count = 0;
+  int exact_primary_fixed_reuse_hit_target_count = 0;
+  int exact_primary_fixed_reuse_fallback_batch_count = 0;
+  int exact_primary_fixed_reuse_fallback_target_count = 0;
+  std::uint64_t exact_primary_fixed_reuse_arena_level_count = 0U;
+  std::uint64_t exact_primary_fixed_reuse_store_batch_count = 0U;
+  std::uint64_t exact_primary_fixed_reuse_store_target_count = 0U;
+  std::uint64_t exact_primary_fixed_reuse_store_window_sync_count = 0U;
+  std::size_t exact_primary_fixed_reuse_peak_live_target_count = 0U;
+  std::size_t exact_primary_fixed_reuse_coefficient_store_d2d_bytes = 0U;
+  std::uint64_t exact_primary_fixed_reuse_coefficient_gather_copy_count = 0U;
+  std::size_t exact_primary_fixed_reuse_coefficient_gather_d2d_bytes = 0U;
+  std::size_t exact_primary_fixed_reuse_peak_device_bytes = 0U;
+  std::uint64_t exact_primary_fixed_reuse_allocation_count = 0U;
+  std::uint64_t exact_primary_fixed_reuse_free_count = 0U;
+  std::size_t exact_primary_fixed_reuse_live_device_bytes_after = 0U;
+  double exact_primary_fixed_reuse_store_host_ms = 0.0;
+  double exact_primary_fixed_reuse_coefficient_gather_host_ms = 0.0;
+  double exact_primary_fixed_reuse_finalization_submit_host_ms = 0.0;
+  bool exact_primary_fixed_reuse_key_diagnostic_enabled = false;
+  std::unordered_map<std::string, ExactPrimaryFixedReuseKeyRecord>
+    exact_primary_fixed_reuse_keys;
+  std::array<std::uint64_t, 65U>
+    exact_primary_fixed_reuse_produced_count_by_level{};
+  std::array<std::uint64_t, 65U>
+    exact_primary_fixed_reuse_request_count_by_level{};
+  std::array<std::uint64_t, 65U>
+    exact_primary_fixed_reuse_unique_request_count_by_level{};
+  std::array<std::uint64_t, 65U>
+    exact_primary_fixed_reuse_missing_count_by_level{};
+  std::array<int, 65U>
+    exact_primary_fixed_reuse_producer_window_count_by_level{};
+  std::array<int, 65U>
+    exact_primary_fixed_reuse_consumer_batch_count_by_level{};
+  std::uint64_t exact_primary_fixed_reuse_duplicate_producer_count = 0U;
   int native_setup_count = 0;
   int native_setup_cache_request_count = 0;
   int native_setup_cache_hit_count = 0;
@@ -1055,6 +1599,7 @@ struct OneCallDiagnostics {
   std::uint64_t cuda_multi_penalty_guarded_qr_evaluation_count = 0;
   std::uint64_t cuda_multi_penalty_stable_svd_evaluation_count = 0;
   std::uint64_t cuda_multi_penalty_selected_evaluation_reuse_count = 0;
+  std::uint64_t cuda_multi_penalty_selected_evaluation_refresh_count = 0;
   std::uint64_t cuda_multi_penalty_stability_replay_target_count = 0;
   std::uint64_t cuda_multi_penalty_stability_replay_selected_count = 0;
   std::uint64_t cuda_multi_penalty_terminal_confirmation_count = 0;
@@ -3376,6 +3921,8 @@ void accumulate_multi_penalty_optimizer_diagnostics(
     source.cuda_stable_svd_evaluation_count;
   diagnostics->cuda_multi_penalty_selected_evaluation_reuse_count +=
     source.cuda_selected_evaluation_reuse_count;
+  diagnostics->cuda_multi_penalty_selected_evaluation_refresh_count +=
+    source.cuda_selected_evaluation_refresh_count;
   diagnostics->cuda_multi_penalty_stability_replay_target_count +=
     source.cuda_stability_replay_target_count;
   diagnostics->cuda_multi_penalty_stability_replay_selected_count +=
@@ -3686,6 +4233,108 @@ Rcpp::DataFrame legacy_component_wave_group_trace_frame(
     Rcpp::Named("full_eig_cuda_ms") = full_eig_cuda_ms,
     Rcpp::Named("component_build_cuda_ms") = component_build_cuda_ms,
     Rcpp::Named("dcov_host_ms") = dcov_host_ms,
+    Rcpp::Named("stringsAsFactors") = false);
+}
+
+double exact_primary_fixed_reuse_distance_quantile(
+    std::vector<int> values,
+    double probability) {
+  if (values.empty()) return 0.0;
+  std::sort(values.begin(), values.end());
+  const std::size_t index = std::min(
+    values.size() - 1U,
+    static_cast<std::size_t>(std::ceil(
+      probability * static_cast<double>(values.size()))) - 1U);
+  return static_cast<double>(values[index]);
+}
+
+Rcpp::DataFrame exact_primary_fixed_reuse_key_frame(
+    const OneCallDiagnostics& diagnostics,
+    int n) {
+  std::vector<int> levels;
+  std::vector<int> producer_windows, consumer_batches;
+  std::vector<double> produced, requests, matched, missing, unique_requests,
+    unconsumed, first_min, first_p50, first_p95, first_max, last_max,
+    residual_payload_bytes, gather_bytes;
+  for (int level = 0; level < 65; ++level) {
+    const std::size_t ordinal = static_cast<std::size_t>(level);
+    const std::uint64_t produced_count = diagnostics
+      .exact_primary_fixed_reuse_produced_count_by_level[ordinal];
+    if (produced_count == 0U) continue;
+    const std::uint64_t request_count = diagnostics
+      .exact_primary_fixed_reuse_request_count_by_level[ordinal];
+    const std::uint64_t missing_count = diagnostics
+      .exact_primary_fixed_reuse_missing_count_by_level[ordinal];
+    const std::uint64_t unique_request_count = diagnostics
+      .exact_primary_fixed_reuse_unique_request_count_by_level[ordinal];
+    std::vector<int> first_distances;
+    std::vector<int> last_distances;
+    for (const auto& entry : diagnostics.exact_primary_fixed_reuse_keys) {
+      const ExactPrimaryFixedReuseKeyRecord& record = entry.second;
+      if (record.level != level || record.request_count == 0U) continue;
+      const int remaining_windows = diagnostics
+        .exact_primary_fixed_reuse_producer_window_count_by_level[ordinal] -
+          record.producer_window;
+      require(remaining_windows >= 0 && record.first_consumer_batch > 0 &&
+                record.last_consumer_batch >= record.first_consumer_batch,
+              "exact-primary reuse distance trace is malformed");
+      first_distances.push_back(
+        remaining_windows + record.first_consumer_batch);
+      last_distances.push_back(
+        remaining_windows + record.last_consumer_batch);
+    }
+    require(first_distances.size() == unique_request_count,
+            "exact-primary reuse unique-key distance accounting changed");
+    levels.push_back(level);
+    producer_windows.push_back(diagnostics
+      .exact_primary_fixed_reuse_producer_window_count_by_level[ordinal]);
+    consumer_batches.push_back(diagnostics
+      .exact_primary_fixed_reuse_consumer_batch_count_by_level[ordinal]);
+    produced.push_back(static_cast<double>(produced_count));
+    requests.push_back(static_cast<double>(request_count));
+    matched.push_back(static_cast<double>(request_count - missing_count));
+    missing.push_back(static_cast<double>(missing_count));
+    unique_requests.push_back(static_cast<double>(unique_request_count));
+    unconsumed.push_back(static_cast<double>(
+      produced_count - unique_request_count));
+    first_min.push_back(first_distances.empty() ? 0.0 :
+      static_cast<double>(*std::min_element(
+        first_distances.begin(), first_distances.end())));
+    first_p50.push_back(exact_primary_fixed_reuse_distance_quantile(
+      first_distances, 0.50));
+    first_p95.push_back(exact_primary_fixed_reuse_distance_quantile(
+      first_distances, 0.95));
+    first_max.push_back(first_distances.empty() ? 0.0 :
+      static_cast<double>(*std::max_element(
+        first_distances.begin(), first_distances.end())));
+    last_max.push_back(last_distances.empty() ? 0.0 :
+      static_cast<double>(*std::max_element(
+        last_distances.begin(), last_distances.end())));
+    residual_payload_bytes.push_back(
+      static_cast<double>(produced_count) * n * sizeof(double));
+    gather_bytes.push_back(
+      static_cast<double>(request_count - missing_count) * n *
+        sizeof(double));
+  }
+  return Rcpp::DataFrame::create(
+    Rcpp::Named("level") = Rcpp::wrap(levels),
+    Rcpp::Named("producer_window_count") = Rcpp::wrap(producer_windows),
+    Rcpp::Named("consumer_batch_count") = Rcpp::wrap(consumer_batches),
+    Rcpp::Named("produced_key_count") = Rcpp::wrap(produced),
+    Rcpp::Named("request_target_count") = Rcpp::wrap(requests),
+    Rcpp::Named("matched_target_count") = Rcpp::wrap(matched),
+    Rcpp::Named("missing_target_count") = Rcpp::wrap(missing),
+    Rcpp::Named("unique_requested_key_count") =
+      Rcpp::wrap(unique_requests),
+    Rcpp::Named("unconsumed_key_count") = Rcpp::wrap(unconsumed),
+    Rcpp::Named("first_reuse_distance_min") = Rcpp::wrap(first_min),
+    Rcpp::Named("first_reuse_distance_p50") = Rcpp::wrap(first_p50),
+    Rcpp::Named("first_reuse_distance_p95") = Rcpp::wrap(first_p95),
+    Rcpp::Named("first_reuse_distance_max") = Rcpp::wrap(first_max),
+    Rcpp::Named("last_reuse_distance_max") = Rcpp::wrap(last_max),
+    Rcpp::Named("residual_payload_bytes") =
+      Rcpp::wrap(residual_payload_bytes),
+    Rcpp::Named("physical_gather_bytes") = Rcpp::wrap(gather_bytes),
     Rcpp::Named("stringsAsFactors") = false);
 }
 
@@ -4310,11 +4959,28 @@ void materialize_multi_penalty_prefill_window(
 
 MultiPenaltyGcvCapacityMultiResult optimize_multi_penalty_prefill_window(
     std::vector<MultiPenaltyGcvCapacityRequest> requests,
-    int maximum_concurrency) {
+    int maximum_concurrency,
+    bool retain_residuals) {
   require(!requests.empty() && maximum_concurrency > 0,
           "multi-penalty prefill optimizer work is empty");
   return multi_penalty_gcv_capacity_optimize_multi(
-    std::move(requests), maximum_concurrency);
+    std::move(requests), maximum_concurrency, retain_residuals);
+}
+
+void release_multi_penalty_prefill_window_residuals(
+    std::vector<std::shared_ptr<MultiPenaltyGcvCapacityResidualBatch>>*
+      residuals) {
+  if (residuals == nullptr) return;
+  for (std::shared_ptr<MultiPenaltyGcvCapacityResidualBatch>& residual :
+       *residuals) {
+    if (!residual) continue;
+    try {
+      release_multi_penalty_gcv_capacity_residual(residual);
+    } catch (...) {
+    }
+    residual.reset();
+  }
+  residuals->clear();
 }
 
 void release_multi_penalty_prefill_window_handles(
@@ -4333,6 +4999,7 @@ void release_multi_penalty_prefill_window_handles(
 void complete_multi_penalty_prefill_window(
     MultiPenaltyPrefillWindowWork* work,
     MultiPenaltyGcvCapacityMultiResult optimization,
+    ExactPrimaryCoefficientArena* coefficient_arena,
     OneCallDiagnostics* diagnostics) {
   require(work != nullptr && diagnostics != nullptr &&
             !work->metadata.empty(),
@@ -4342,7 +5009,10 @@ void complete_multi_penalty_prefill_window(
     require(optimization.setups.size() == work->metadata.size() &&
               optimization.diagnostics.setup_count ==
                 static_cast<int>(work->metadata.size()) &&
-              optimization.diagnostics.max_host_calls_in_flight > 0,
+              optimization.diagnostics.max_host_calls_in_flight > 0 &&
+              ((coefficient_arena != nullptr && coefficient_arena->enabled()) ?
+                 optimization.residuals.size() == work->metadata.size() :
+                 optimization.residuals.empty()),
             "multi-penalty cross-setup CUDA optimizer coverage changed");
     for (std::size_t setup_index = 0; setup_index < work->metadata.size();
          ++setup_index) {
@@ -4352,6 +5022,10 @@ void complete_multi_penalty_prefill_window(
         optimization.setups[setup_index];
       const int target_count = static_cast<int>(request.targets.size());
       const int penalty_count = request.context->penalty_count;
+      std::vector<std::string> exact_residual_keys;
+      if (coefficient_arena != nullptr && coefficient_arena->enabled()) {
+        exact_residual_keys.reserve(static_cast<std::size_t>(target_count));
+      }
       diagnostics->cuda_multi_penalty_optimizer_setup_count += 1;
       diagnostics->cuda_optimizer_kernel_launch_count +=
         result.diagnostics.cuda_qt_y_kernel_launch_count +
@@ -4398,13 +5072,62 @@ void complete_multi_penalty_prefill_window(
           request.context->dataset_key, state, diagnostics);
         const std::string& base_key = request.base_target_keys[
           static_cast<std::size_t>(target_index)];
+        if (diagnostics
+              ->exact_primary_fixed_reuse_key_diagnostic_enabled) {
+          const int level = work->batch.level;
+          require(level >= 0 && level < 65 &&
+                    result.diagnostics.exact_primary_only,
+                  "exact-primary reuse producer trace observed an invalid "
+                  "level or optimizer route");
+          const std::string key = exact_fixed_residual_key(
+            base_key, state.selected_log_sp.data(), penalty_count);
+          ExactPrimaryFixedReuseKeyRecord record;
+          record.level = level;
+          record.producer_window = work->batch.window_id;
+          const auto inserted = diagnostics
+            ->exact_primary_fixed_reuse_keys.emplace(key, record);
+          diagnostics->exact_primary_fixed_reuse_duplicate_producer_count +=
+            inserted.second ? 0U : 1U;
+          diagnostics
+            ->exact_primary_fixed_reuse_produced_count_by_level[
+              static_cast<std::size_t>(level)] += 1U;
+          diagnostics
+            ->exact_primary_fixed_reuse_producer_window_count_by_level[
+              static_cast<std::size_t>(level)] = std::max(
+                diagnostics
+                  ->exact_primary_fixed_reuse_producer_window_count_by_level[
+                    static_cast<std::size_t>(level)],
+                work->batch.window_id);
+        }
+        if (coefficient_arena != nullptr && coefficient_arena->enabled()) {
+          exact_residual_keys.push_back(exact_fixed_residual_key(
+            base_key, state.selected_log_sp.data(), penalty_count));
+        }
         work->batch.optimized_target_keys.push_back(base_key);
         diagnostics->prefill_target_keys.insert(base_key);
       }
+      if (coefficient_arena != nullptr && coefficient_arena->enabled()) {
+        coefficient_arena->enqueue_store(
+          work->batch.level, request.base_target_keys, exact_residual_keys,
+          optimization.residuals[setup_index]);
+      }
       diagnostics->cuda_multi_penalty_target_count += target_count;
-      release_multi_penalty_handle(request.context, diagnostics);
+      if (coefficient_arena == nullptr || !coefficient_arena->enabled()) {
+        release_multi_penalty_handle(request.context, diagnostics);
+      }
+    }
+    if (coefficient_arena != nullptr && coefficient_arena->enabled()) {
+      coefficient_arena->finish_store_window();
+      release_multi_penalty_prefill_window_residuals(
+        &optimization.residuals);
+      release_multi_penalty_prefill_window_handles(
+        work->metadata, diagnostics);
     }
   } catch (...) {
+    if (coefficient_arena != nullptr) {
+      coefficient_arena->synchronize_noexcept();
+    }
+    release_multi_penalty_prefill_window_residuals(&optimization.residuals);
     release_multi_penalty_prefill_window_handles(work->metadata, diagnostics);
     throw;
   }
@@ -4428,6 +5151,7 @@ void prefill_multi_penalty_target_states(
     const LayerPlan& plan,
     const std::vector<SinglePenaltyPrefillGroup>& groups,
     PrefillBatchDiagnostic* batch,
+    ExactPrimaryCoefficientArena* coefficient_arena,
     OneCallDiagnostics* diagnostics) {
   require(batch != nullptr,
           "multi-penalty prefill output batch is missing");
@@ -4440,14 +5164,20 @@ void prefill_multi_penalty_target_states(
   }
   MultiPenaltyGcvCapacityMultiResult optimization;
   try {
+    const bool retain_residuals =
+      coefficient_arena != nullptr && coefficient_arena->enabled();
+    for (MultiPenaltyGcvCapacityRequest& request : work.requests) {
+      request.control.force_final_selected_evaluation = retain_residuals;
+    }
     optimization = optimize_multi_penalty_prefill_window(
-      std::move(work.requests), work.maximum_concurrency);
+      std::move(work.requests), work.maximum_concurrency,
+      retain_residuals);
   } catch (...) {
     release_multi_penalty_prefill_window_handles(work.metadata, diagnostics);
     throw;
   }
   complete_multi_penalty_prefill_window(
-    &work, std::move(optimization), diagnostics);
+    &work, std::move(optimization), coefficient_arena, diagnostics);
   *batch = std::move(work.batch);
 }
 
@@ -4460,6 +5190,7 @@ void prefill_multi_penalty_level_target_states(
     const Rcpp::NumericMatrix& data,
     const LayerPlan& plan,
     NativeSetupCache* setup_cache,
+    ExactPrimaryCoefficientArena* coefficient_arena,
     OneCallDiagnostics* diagnostics) {
   require(setup_cache != nullptr,
           "multi-penalty level prefill setup cache is missing");
@@ -4497,7 +5228,7 @@ void prefill_multi_penalty_level_target_states(
     diagnostics->setup_optimizer_pipeline_overlap_ms += std::max(
       0.0, optimization.diagnostics.wall_host_ms - wait_ms);
     complete_multi_penalty_prefill_window(
-      &pending->work, std::move(optimization), diagnostics);
+      &pending->work, std::move(optimization), coefficient_arena, diagnostics);
     diagnostics->prefill_batches.push_back(
       std::move(pending->work.batch));
     pending.reset();
@@ -4513,7 +5244,8 @@ void prefill_multi_penalty_level_target_states(
     if (!diagnostics->setup_optimizer_pipeline_enabled) {
       diagnostics->prefill_batches.push_back(std::move(batch));
       prefill_multi_penalty_target_states(
-        data, plan, window, &diagnostics->prefill_batches.back(), diagnostics);
+        data, plan, window, &diagnostics->prefill_batches.back(),
+        coefficient_arena, diagnostics);
       window.clear();
       return;
     }
@@ -4531,13 +5263,19 @@ void prefill_multi_penalty_level_target_states(
       return;
     }
     const int maximum_concurrency = work.maximum_concurrency;
+    const bool retain_residuals =
+      coefficient_arena != nullptr && coefficient_arena->enabled();
+    for (MultiPenaltyGcvCapacityRequest& request : work.requests) {
+      request.control.force_final_selected_evaluation = retain_residuals;
+    }
     std::vector<MultiPenaltyGcvCapacityRequest> requests =
       std::move(work.requests);
     std::future<MultiPenaltyGcvCapacityMultiResult> future = std::async(
       std::launch::async,
-      [requests = std::move(requests), maximum_concurrency]() mutable {
+      [requests = std::move(requests), maximum_concurrency,
+       retain_residuals]() mutable {
         return optimize_multi_penalty_prefill_window(
-          std::move(requests), maximum_concurrency);
+          std::move(requests), maximum_concurrency, retain_residuals);
       });
     pending.reset(new PendingMultiPenaltyPrefillWindow{
       std::move(work), std::move(future)});
@@ -4591,6 +5329,7 @@ GroupResult execute_group(
       method_execution_context,
     const std::shared_ptr<FullCudaCiLegacyEigComponentCache>&
       legacy_component_cache,
+    ExactPrimaryCoefficientArena* exact_primary_coefficient_arena,
     LegacyRPermutationWorkspace* permutation_workspace,
     OneCallDiagnostics* diagnostics) {
   require(!task_indices.empty() &&
@@ -5367,78 +6106,260 @@ GroupResult execute_group(
       run_full_cuda_ci_phase35_legacy_eig_batch(
         context->fixed_sp, batch, legacy_request);
   } else {
-    ensure_multi_penalty_handle(context, target_count, diagnostics);
     for (std::size_t index = 0; index < selected_sp.size(); ++index) {
       require(std::isfinite(selected_sp[index]) && selected_sp[index] > 0.0,
               "exact fixed evaluator selected SP is invalid");
       require(std::isfinite(selected_log_sp[index]),
               "exact fixed evaluator selected log-SP is invalid");
     }
-    std::shared_ptr<MultiPenaltyGcvCapacityResidualBatch> exact_residual;
-    try {
-      const auto solve_started = std::chrono::steady_clock::now();
-      exact_residual = multi_penalty_gcv_capacity_evaluate_fixed_batch(
-        context->multi_penalty, Y.data(), selected_log_sp.data(), context->n,
-        target_count, residual_keys,
-        std::sqrt(std::numeric_limits<double>::epsilon()));
-      const double exact_solve_host_ms = elapsed_ms(solve_started);
-      const MultiPenaltyGcvCudaResidualInfo exact_info =
-        multi_penalty_gcv_capacity_residual_info(exact_residual);
-      require(exact_info.n == context->n &&
-                exact_info.coefficient_dim == context->coefficient_dim &&
-                exact_info.target_count == target_count &&
-                exact_info.target_keys == residual_keys &&
-                exact_info.solver_info.size() == residual_keys.size() &&
-                exact_info.decomposition_route.size() ==
-                  residual_keys.size() &&
-                exact_info.numerical_rank.size() == residual_keys.size() &&
-                exact_info.fixed_sp_evaluation && exact_info.device_resident &&
-                !exact_info.released &&
-                std::all_of(
-                  exact_info.solver_info.begin(), exact_info.solver_info.end(),
-                  [](int value) { return value == 0; }) &&
-                std::all_of(
-                  exact_info.decomposition_route.begin(),
-                  exact_info.decomposition_route.end(),
-                  [](int value) {
-                    return value ==
-                      kMultiPenaltyGcvDecompositionStableSvd;
-                  }) &&
-                std::all_of(
-                  exact_info.numerical_rank.begin(),
-                  exact_info.numerical_rank.end(),
-                  [](int value) { return value > 0; }),
-              "exact fixed evaluator authority gate failed closed");
-      diagnostics->cuda_exact_fixed_evaluator_batch_count += 1;
-      diagnostics->cuda_exact_fixed_evaluator_target_count += target_count;
-      diagnostics->cuda_exact_fixed_evaluator_stable_svd_target_count +=
-        target_count;
-      diagnostics->cuda_exact_fixed_evaluator_host_ms += exact_solve_host_ms;
-      const MultiPenaltyGcvCudaResidualConsumerView exact_view =
-        acquire_multi_penalty_gcv_capacity_residual_consumer_view(
-          exact_residual);
-      legacy =
-        run_full_cuda_ci_phase35_legacy_eig_batch_from_fixed_evaluator_residual(
-          context->fixed_sp, exact_view, legacy_request,
-          legacy_component_cache);
-      legacy.diagnostics.residual_solve_host_ms += exact_solve_host_ms;
-      release_multi_penalty_gcv_capacity_residual(exact_residual);
-      exact_residual.reset();
-      release_multi_penalty_handle(context, diagnostics);
-    } catch (...) {
-      if (exact_residual) {
-        try {
+    if (diagnostics->exact_primary_fixed_reuse_key_diagnostic_enabled &&
+        context->penalty_count > 1) {
+      const int level = plan.level;
+      require(level >= 0 && level < 65,
+              "exact-primary reuse consumer trace level is invalid");
+      const int consumer_batch = ++diagnostics
+        ->exact_primary_fixed_reuse_consumer_batch_count_by_level[
+          static_cast<std::size_t>(level)];
+      for (const std::string& key : residual_keys) {
+        diagnostics->exact_primary_fixed_reuse_request_count_by_level[
+          static_cast<std::size_t>(level)] += 1U;
+        auto found = diagnostics->exact_primary_fixed_reuse_keys.find(key);
+        if (found == diagnostics->exact_primary_fixed_reuse_keys.end() ||
+            found->second.level != level) {
+          diagnostics->exact_primary_fixed_reuse_missing_count_by_level[
+            static_cast<std::size_t>(level)] += 1U;
+          continue;
+        }
+        ExactPrimaryFixedReuseKeyRecord& record = found->second;
+        if (record.request_count == 0U) {
+          record.first_consumer_batch = consumer_batch;
+          diagnostics
+            ->exact_primary_fixed_reuse_unique_request_count_by_level[
+              static_cast<std::size_t>(level)] += 1U;
+        }
+        record.last_consumer_batch = consumer_batch;
+        record.request_count += 1U;
+      }
+    }
+    const bool reuse_exact_primary =
+      context->penalty_count > 1 &&
+        exact_primary_coefficient_arena != nullptr &&
+        exact_primary_coefficient_arena->enabled() &&
+        exact_primary_coefficient_arena->contains_all(
+          plan.level, residual_keys);
+    if (reuse_exact_primary) {
+      ensure_multi_penalty_handle(context, target_count, diagnostics);
+      std::shared_ptr<MultiPenaltyGcvCapacityResidualBatch> exact_residual;
+      try {
+        MultiPenaltyGcvCudaResidualShadow fixed_shadow;
+        if (diagnostics
+              ->exact_primary_coefficient_parity_diagnostic_enabled) {
+          exact_residual = multi_penalty_gcv_capacity_evaluate_fixed_batch(
+            context->multi_penalty, Y.data(), selected_log_sp.data(),
+            context->n, target_count, residual_keys,
+            std::sqrt(std::numeric_limits<double>::epsilon()));
+          const MultiPenaltyGcvCudaResidualInfo fixed_info =
+            multi_penalty_gcv_capacity_residual_info(exact_residual);
+          require(
+            fixed_info.n == context->n &&
+              fixed_info.coefficient_dim == context->coefficient_dim &&
+              fixed_info.target_count == target_count &&
+              fixed_info.target_keys == residual_keys &&
+              fixed_info.fixed_sp_evaluation &&
+              fixed_info.device_resident && !fixed_info.released &&
+              std::all_of(
+                fixed_info.solver_info.begin(), fixed_info.solver_info.end(),
+                [](int value) { return value == 0; }) &&
+              std::all_of(
+                fixed_info.decomposition_route.begin(),
+                fixed_info.decomposition_route.end(),
+                [](int value) {
+                  return value ==
+                    kMultiPenaltyGcvDecompositionStableSvd;
+                }) &&
+              std::all_of(
+                fixed_info.numerical_rank.begin(),
+                fixed_info.numerical_rank.end(),
+                [](int value) { return value > 0; }),
+            "exact-primary coefficient parity fixed authority failed closed");
+          fixed_shadow =
+            materialize_multi_penalty_gcv_capacity_residual_shadow(
+              exact_residual);
           release_multi_penalty_gcv_capacity_residual(exact_residual);
-        } catch (...) {
+          exact_residual.reset();
         }
-      }
-      if (context->multi_penalty) {
-        try {
-          release_multi_penalty_handle(context, diagnostics);
-        } catch (...) {
+        const MultiPenaltyGcvCudaCoefficientConsumerView coefficients =
+          exact_primary_coefficient_arena->gather_coefficients(
+            plan.level, context->coefficient_dim, residual_keys);
+        const auto finalization_started = std::chrono::steady_clock::now();
+        exact_residual =
+          multi_penalty_gcv_capacity_finalize_selected_coefficients(
+            context->multi_penalty, Y.data(), coefficients, context->n,
+            target_count, residual_keys);
+        diagnostics->exact_primary_fixed_reuse_finalization_submit_host_ms +=
+          elapsed_ms(finalization_started);
+        const MultiPenaltyGcvCudaResidualInfo exact_info =
+          multi_penalty_gcv_capacity_residual_info(exact_residual);
+        require(exact_info.n == context->n &&
+                  exact_info.coefficient_dim == context->coefficient_dim &&
+                  exact_info.target_count == target_count &&
+                  exact_info.target_keys == residual_keys &&
+                  exact_info.fixed_sp_evaluation &&
+                  exact_info.device_resident && !exact_info.released &&
+                  exact_info.solver_info == coefficients.solver_info &&
+                  exact_info.decomposition_route ==
+                    coefficients.decomposition_route &&
+                  exact_info.numerical_rank == coefficients.numerical_rank,
+                "exact-primary coefficient finalization authority gate "
+                "failed closed");
+        if (diagnostics
+              ->exact_primary_coefficient_parity_diagnostic_enabled) {
+          const MultiPenaltyGcvCudaResidualShadow reuse_shadow =
+            materialize_multi_penalty_gcv_capacity_residual_shadow(
+              exact_residual);
+          require(
+            fixed_shadow.n == reuse_shadow.n &&
+              fixed_shadow.coefficient_dim ==
+                reuse_shadow.coefficient_dim &&
+              fixed_shadow.target_count == reuse_shadow.target_count,
+            "exact-primary coefficient parity residual shape changed");
+          diagnostics->exact_primary_coefficient_parity_batch_count += 1;
+          if (!compare_shadow_values(
+                fixed_shadow.coefficients, reuse_shadow.coefficients,
+                &diagnostics
+                   ->exact_primary_coefficient_parity_max_coefficient_error)) {
+            diagnostics
+              ->exact_primary_coefficient_parity_coefficient_mismatch_batch_count +=
+                1;
+          }
+          if (!compare_shadow_values(
+                fixed_shadow.fitted, reuse_shadow.fitted,
+                &diagnostics
+                   ->exact_primary_coefficient_parity_max_fitted_error)) {
+            diagnostics
+              ->exact_primary_coefficient_parity_fitted_mismatch_batch_count +=
+                1;
+          }
+          if (!compare_shadow_values(
+                fixed_shadow.residuals, reuse_shadow.residuals,
+                &diagnostics
+                   ->exact_primary_coefficient_parity_max_residual_error)) {
+            diagnostics
+              ->exact_primary_coefficient_parity_residual_mismatch_batch_count +=
+                1;
+          }
         }
+        const MultiPenaltyGcvCudaResidualConsumerView exact_view =
+          acquire_multi_penalty_gcv_capacity_residual_consumer_view(
+            exact_residual);
+        legacy =
+          run_full_cuda_ci_phase35_legacy_eig_batch_from_exact_primary_reuse_residual(
+            context->fixed_sp, exact_view, legacy_request,
+            legacy_component_cache);
+        release_multi_penalty_gcv_capacity_residual(exact_residual);
+        exact_residual.reset();
+        release_multi_penalty_handle(context, diagnostics);
+      } catch (...) {
+        if (exact_residual) {
+          try {
+            release_multi_penalty_gcv_capacity_residual(exact_residual);
+          } catch (...) {
+          }
+        }
+        if (context->multi_penalty) {
+          try {
+            release_multi_penalty_handle(context, diagnostics);
+          } catch (...) {
+          }
+        }
+        throw;
       }
-      throw;
+      diagnostics->exact_primary_fixed_reuse_hit_batch_count += 1;
+      diagnostics->exact_primary_fixed_reuse_hit_target_count += target_count;
+      // The consumer still uploads Y and reproduces the original cohort-wide
+      // GEMM/residual materialization. Only selected log-SP and stable-SVD are
+      // bypassed by the exact-primary coefficient identity.
+      const std::size_t skipped_log_sp_h2d_bytes =
+        selected_sp.size() * sizeof(double);
+      require(diagnostics->matrix_h2d_bytes >= skipped_log_sp_h2d_bytes,
+              "exact-primary coefficient reuse accounting underflow");
+      diagnostics->matrix_h2d_bytes -= skipped_log_sp_h2d_bytes;
+    } else {
+      if (context->penalty_count > 1 &&
+          exact_primary_coefficient_arena != nullptr &&
+          exact_primary_coefficient_arena->enabled()) {
+        diagnostics->exact_primary_fixed_reuse_fallback_batch_count += 1;
+        diagnostics->exact_primary_fixed_reuse_fallback_target_count +=
+          target_count;
+      }
+      ensure_multi_penalty_handle(context, target_count, diagnostics);
+      std::shared_ptr<MultiPenaltyGcvCapacityResidualBatch> exact_residual;
+      try {
+        const auto solve_started = std::chrono::steady_clock::now();
+        exact_residual = multi_penalty_gcv_capacity_evaluate_fixed_batch(
+          context->multi_penalty, Y.data(), selected_log_sp.data(), context->n,
+          target_count, residual_keys,
+          std::sqrt(std::numeric_limits<double>::epsilon()));
+        const double exact_solve_host_ms = elapsed_ms(solve_started);
+        const MultiPenaltyGcvCudaResidualInfo exact_info =
+          multi_penalty_gcv_capacity_residual_info(exact_residual);
+        require(exact_info.n == context->n &&
+                  exact_info.coefficient_dim == context->coefficient_dim &&
+                  exact_info.target_count == target_count &&
+                  exact_info.target_keys == residual_keys &&
+                  exact_info.solver_info.size() == residual_keys.size() &&
+                  exact_info.decomposition_route.size() ==
+                    residual_keys.size() &&
+                  exact_info.numerical_rank.size() == residual_keys.size() &&
+                  exact_info.fixed_sp_evaluation &&
+                  exact_info.device_resident && !exact_info.released &&
+                  std::all_of(
+                    exact_info.solver_info.begin(),
+                    exact_info.solver_info.end(),
+                    [](int value) { return value == 0; }) &&
+                  std::all_of(
+                    exact_info.decomposition_route.begin(),
+                    exact_info.decomposition_route.end(),
+                    [](int value) {
+                      return value ==
+                        kMultiPenaltyGcvDecompositionStableSvd;
+                    }) &&
+                  std::all_of(
+                    exact_info.numerical_rank.begin(),
+                    exact_info.numerical_rank.end(),
+                    [](int value) { return value > 0; }),
+                "exact fixed evaluator authority gate failed closed");
+        diagnostics->cuda_exact_fixed_evaluator_batch_count += 1;
+        diagnostics->cuda_exact_fixed_evaluator_target_count += target_count;
+        diagnostics->cuda_exact_fixed_evaluator_stable_svd_target_count +=
+          target_count;
+        diagnostics->cuda_exact_fixed_evaluator_host_ms += exact_solve_host_ms;
+        const MultiPenaltyGcvCudaResidualConsumerView exact_view =
+          acquire_multi_penalty_gcv_capacity_residual_consumer_view(
+            exact_residual);
+        legacy =
+          run_full_cuda_ci_phase35_legacy_eig_batch_from_fixed_evaluator_residual(
+            context->fixed_sp, exact_view, legacy_request,
+            legacy_component_cache);
+        legacy.diagnostics.residual_solve_host_ms += exact_solve_host_ms;
+        release_multi_penalty_gcv_capacity_residual(exact_residual);
+        exact_residual.reset();
+        release_multi_penalty_handle(context, diagnostics);
+      } catch (...) {
+        if (exact_residual) {
+          try {
+            release_multi_penalty_gcv_capacity_residual(exact_residual);
+          } catch (...) {
+          }
+        }
+        if (context->multi_penalty) {
+          try {
+            release_multi_penalty_handle(context, diagnostics);
+          } catch (...) {
+          }
+        }
+        throw;
+      }
     }
   }
   accumulate_legacy_compatible_diagnostics(legacy.diagnostics, diagnostics);
@@ -5533,6 +6454,28 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
   diagnostics.dcc_gamma_exact_primary_optimizer_requested =
     method_options.ci_method == "dcc.gamma" &&
       dcc_gamma_exact_primary_optimizer_policy();
+  diagnostics.exact_primary_fixed_reuse_requested =
+    method_options.ci_method == "dcc.gamma" &&
+      diagnostics.dcc_gamma_exact_primary_optimizer_requested &&
+      dcc_gamma_exact_primary_fixed_reuse_policy();
+  diagnostics.exact_primary_coefficient_parity_diagnostic_enabled =
+    method_options.ci_method == "dcc.gamma" &&
+      exact_primary_coefficient_parity_diagnostic_policy();
+  diagnostics.exact_primary_fixed_reuse_key_diagnostic_enabled =
+    method_options.ci_method == "dcc.gamma" &&
+      dcc_gamma_exact_primary_fixed_reuse_key_diagnostic_policy();
+  require(
+    (!diagnostics.exact_primary_fixed_reuse_key_diagnostic_enabled &&
+     !diagnostics.exact_primary_fixed_reuse_requested &&
+     !diagnostics.exact_primary_coefficient_parity_diagnostic_enabled) ||
+      diagnostics.dcc_gamma_exact_primary_optimizer_requested,
+    "exact-primary/fixed reuse requires exact-primary");
+  require(
+    !diagnostics.exact_primary_coefficient_parity_diagnostic_enabled ||
+      diagnostics.exact_primary_fixed_reuse_requested,
+    "exact-primary coefficient parity diagnostic requires reuse");
+  ExactPrimaryCoefficientArena exact_primary_coefficient_arena(
+    diagnostics.exact_primary_fixed_reuse_requested, n, p);
   diagnostics.method_critical_path_trace_capacity =
     strict_method_critical_path_trace_capacity();
   if (diagnostics.method_critical_path_trace_capacity > 0) {
@@ -5733,6 +6676,9 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
       int deletions = 0;
       int rounds = 0;
       bool pcalg_done = true;
+      if (exact_primary_coefficient_arena.enabled() && level >= 3) {
+        exact_primary_coefficient_arena.begin_level(level);
+      }
 
       std::vector<std::vector<int>> edge_tasks(
         static_cast<std::size_t>(p) * p);
@@ -5747,7 +6693,8 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
           data, plan, &setup_cache, &diagnostics);
       } else if (fresh_dataset_semantic_caches && level >= 3) {
         prefill_multi_penalty_level_target_states(
-          data, plan, &setup_cache, &diagnostics);
+          data, plan, &setup_cache, &exact_primary_coefficient_arena,
+          &diagnostics);
       }
       std::vector<std::size_t> edge_positions(
         static_cast<std::size_t>(p) * p, 0U);
@@ -6030,6 +6977,7 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
               data, work.context, plan, work.group_tasks, work.group_ids,
               num_col, work.direct, method_options, method_residual_cache,
               method_execution_context, legacy_component_cache,
+              &exact_primary_coefficient_arena,
               &permutation_workspace, &diagnostics);
             require(result.p_values.size() == work.missing_positions.size(),
                     "compatible.cuda group result alignment changed");
@@ -6223,6 +7171,9 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
       level_deletions.push_back(deletions);
       level_rounds.push_back(rounds);
       level_elapsed_ms.push_back(elapsed_ms(level_started));
+      if (exact_primary_coefficient_arena.enabled() && level >= 3) {
+        exact_primary_coefficient_arena.finish_level(level);
+      }
       if (pcalg_done) break;
     }
   } catch (...) {
@@ -6234,6 +7185,35 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
 
   close_context(direct);
   setup_cache.clear();
+  exact_primary_coefficient_arena.close();
+  diagnostics.exact_primary_fixed_reuse_arena_level_count =
+    exact_primary_coefficient_arena.level_count();
+  diagnostics.exact_primary_fixed_reuse_store_batch_count =
+    exact_primary_coefficient_arena.store_batch_count();
+  diagnostics.exact_primary_fixed_reuse_store_target_count =
+    exact_primary_coefficient_arena.store_target_count();
+  diagnostics.exact_primary_fixed_reuse_store_window_sync_count =
+    exact_primary_coefficient_arena.store_window_sync_count();
+  diagnostics.exact_primary_fixed_reuse_peak_live_target_count =
+    exact_primary_coefficient_arena.peak_live_targets();
+  diagnostics.exact_primary_fixed_reuse_coefficient_store_d2d_bytes =
+    exact_primary_coefficient_arena.coefficient_store_d2d_bytes();
+  diagnostics.exact_primary_fixed_reuse_coefficient_gather_copy_count =
+    exact_primary_coefficient_arena.coefficient_gather_copy_count();
+  diagnostics.exact_primary_fixed_reuse_coefficient_gather_d2d_bytes =
+    exact_primary_coefficient_arena.coefficient_gather_d2d_bytes();
+  diagnostics.exact_primary_fixed_reuse_peak_device_bytes =
+    exact_primary_coefficient_arena.peak_device_bytes();
+  diagnostics.exact_primary_fixed_reuse_allocation_count =
+    exact_primary_coefficient_arena.allocation_count();
+  diagnostics.exact_primary_fixed_reuse_free_count =
+    exact_primary_coefficient_arena.free_count();
+  diagnostics.exact_primary_fixed_reuse_live_device_bytes_after =
+    exact_primary_coefficient_arena.current_device_bytes();
+  diagnostics.exact_primary_fixed_reuse_store_host_ms =
+    exact_primary_coefficient_arena.store_host_ms();
+  diagnostics.exact_primary_fixed_reuse_coefficient_gather_host_ms =
+    exact_primary_coefficient_arena.coefficient_gather_host_ms();
   const std::size_t runtime_workspace_bytes = runtime_pool.close(&diagnostics);
 
   Rcpp::LogicalVector deleted_trace(trace_deleted.size());
@@ -6843,6 +7823,115 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
     diagnostics.cuda_exact_fixed_evaluator_stable_svd_target_count ==
       diagnostics.cuda_exact_fixed_evaluator_target_count,
     "compatible.cuda exact fixed evaluator route accounting changed");
+  if (diagnostics.exact_primary_fixed_reuse_requested) {
+    require(
+      diagnostics.exact_primary_fixed_reuse_store_target_count ==
+        diagnostics.cuda_multi_penalty_exact_primary_target_count &&
+        diagnostics
+            .exact_primary_fixed_reuse_coefficient_gather_copy_count ==
+          static_cast<std::uint64_t>(
+            diagnostics.exact_primary_fixed_reuse_hit_target_count) &&
+        ((diagnostics.exact_primary_fixed_reuse_store_target_count == 0U &&
+          diagnostics
+              .exact_primary_fixed_reuse_coefficient_store_d2d_bytes == 0U) ||
+         (diagnostics.exact_primary_fixed_reuse_store_target_count > 0U &&
+          diagnostics
+              .exact_primary_fixed_reuse_coefficient_store_d2d_bytes > 0U)) &&
+        ((diagnostics.exact_primary_fixed_reuse_hit_target_count == 0 &&
+          diagnostics
+              .exact_primary_fixed_reuse_coefficient_gather_d2d_bytes == 0U) ||
+         (diagnostics.exact_primary_fixed_reuse_hit_target_count > 0 &&
+          diagnostics
+              .exact_primary_fixed_reuse_coefficient_gather_d2d_bytes > 0U)) &&
+        diagnostics.exact_primary_fixed_reuse_allocation_count ==
+          diagnostics.exact_primary_fixed_reuse_free_count &&
+        diagnostics.exact_primary_fixed_reuse_live_device_bytes_after == 0U,
+      "exact-primary coefficient arena accounting failed closed");
+  } else {
+    require(
+      diagnostics.exact_primary_fixed_reuse_hit_batch_count == 0 &&
+        diagnostics.exact_primary_fixed_reuse_hit_target_count == 0 &&
+        diagnostics.exact_primary_fixed_reuse_fallback_batch_count == 0 &&
+        diagnostics.exact_primary_fixed_reuse_fallback_target_count == 0 &&
+        diagnostics.exact_primary_fixed_reuse_store_target_count == 0U &&
+        diagnostics
+            .exact_primary_fixed_reuse_coefficient_store_d2d_bytes == 0U &&
+        diagnostics
+            .exact_primary_fixed_reuse_coefficient_gather_copy_count == 0U &&
+        diagnostics.exact_primary_fixed_reuse_allocation_count == 0U &&
+        diagnostics.exact_primary_fixed_reuse_free_count == 0U &&
+        diagnostics.exact_primary_fixed_reuse_live_device_bytes_after == 0U,
+      "disabled exact-primary coefficient arena changed state");
+  }
+  if (diagnostics.exact_primary_coefficient_parity_diagnostic_enabled) {
+    require(
+      diagnostics.exact_primary_coefficient_parity_batch_count ==
+        diagnostics.exact_primary_fixed_reuse_hit_batch_count &&
+        diagnostics
+            .exact_primary_coefficient_parity_coefficient_mismatch_batch_count <=
+          diagnostics.exact_primary_coefficient_parity_batch_count &&
+        diagnostics
+            .exact_primary_coefficient_parity_fitted_mismatch_batch_count <=
+          diagnostics.exact_primary_coefficient_parity_batch_count &&
+        diagnostics
+            .exact_primary_coefficient_parity_residual_mismatch_batch_count <=
+          diagnostics.exact_primary_coefficient_parity_batch_count,
+      "exact-primary coefficient parity accounting failed closed");
+  } else {
+    require(
+      diagnostics.exact_primary_coefficient_parity_batch_count == 0 &&
+        diagnostics
+            .exact_primary_coefficient_parity_coefficient_mismatch_batch_count ==
+          0 &&
+        diagnostics
+            .exact_primary_coefficient_parity_fitted_mismatch_batch_count ==
+          0 &&
+        diagnostics
+            .exact_primary_coefficient_parity_residual_mismatch_batch_count ==
+          0 &&
+        diagnostics.exact_primary_coefficient_parity_max_coefficient_error ==
+          0.0 &&
+        diagnostics.exact_primary_coefficient_parity_max_fitted_error == 0.0 &&
+        diagnostics.exact_primary_coefficient_parity_max_residual_error == 0.0,
+      "disabled exact-primary coefficient parity changed state");
+  }
+  std::uint64_t exact_primary_fixed_reuse_produced_count = 0U;
+  std::uint64_t exact_primary_fixed_reuse_request_count = 0U;
+  std::uint64_t exact_primary_fixed_reuse_unique_request_count = 0U;
+  std::uint64_t exact_primary_fixed_reuse_missing_count = 0U;
+  std::uint64_t exact_primary_fixed_reuse_peak_live_count = 0U;
+  for (std::size_t level = 0U; level < 65U; ++level) {
+    const std::uint64_t produced = diagnostics
+      .exact_primary_fixed_reuse_produced_count_by_level[level];
+    const std::uint64_t requests = diagnostics
+      .exact_primary_fixed_reuse_request_count_by_level[level];
+    const std::uint64_t unique_requests = diagnostics
+      .exact_primary_fixed_reuse_unique_request_count_by_level[level];
+    const std::uint64_t missing = diagnostics
+      .exact_primary_fixed_reuse_missing_count_by_level[level];
+    require(unique_requests <= produced && missing <= requests,
+            "exact-primary/fixed reuse key accounting is malformed");
+    exact_primary_fixed_reuse_produced_count += produced;
+    exact_primary_fixed_reuse_request_count += requests;
+    exact_primary_fixed_reuse_unique_request_count += unique_requests;
+    exact_primary_fixed_reuse_missing_count += missing;
+    exact_primary_fixed_reuse_peak_live_count = std::max(
+      exact_primary_fixed_reuse_peak_live_count, produced);
+  }
+  if (diagnostics.exact_primary_fixed_reuse_key_diagnostic_enabled) {
+    require(
+      diagnostics.exact_primary_fixed_reuse_duplicate_producer_count == 0U &&
+        exact_primary_fixed_reuse_missing_count == 0U &&
+        diagnostics.exact_primary_fixed_reuse_keys.size() ==
+          exact_primary_fixed_reuse_produced_count,
+      "exact-primary/fixed reuse key intersection failed closed");
+  } else {
+    require(
+      diagnostics.exact_primary_fixed_reuse_keys.empty() &&
+        exact_primary_fixed_reuse_produced_count == 0U &&
+        exact_primary_fixed_reuse_request_count == 0U,
+      "disabled exact-primary/fixed reuse key diagnostic changed state");
+  }
   const double decomposition_reuse_ratio =
     decomposition_reuse.stored_count > 0U ?
       static_cast<double>(decomposition_reuse.reuse_count) /
@@ -6878,6 +7967,8 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
   const Rcpp::DataFrame legacy_component_wave_group_trace =
     legacy_component_wave_group_trace_frame(
       diagnostics.legacy_component_wave_group_trace);
+  const Rcpp::DataFrame exact_primary_fixed_reuse_key_trace =
+    exact_primary_fixed_reuse_key_frame(diagnostics, n);
 
   return Rcpp::List::create(
     Rcpp::Named("adjacency") = adjacency_matrix(adjacency, p),
@@ -6891,6 +7982,8 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
       legacy_component_eig_miss_histogram,
     Rcpp::Named("legacy_component_wave_group_trace") =
       legacy_component_wave_group_trace,
+    Rcpp::Named("exact_primary_fixed_reuse_key_trace") =
+      exact_primary_fixed_reuse_key_trace,
     Rcpp::Named("summary") = Rcpp::List::create(
       Rcpp::Named("run_status") = "ok",
       Rcpp::Named("entrypoint") =
@@ -7078,6 +8171,9 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
       Rcpp::Named("cuda_multi_penalty_selected_evaluation_reuse_count") =
         static_cast<double>(
           diagnostics.cuda_multi_penalty_selected_evaluation_reuse_count),
+      Rcpp::Named("cuda_multi_penalty_selected_evaluation_refresh_count") =
+        static_cast<double>(
+          diagnostics.cuda_multi_penalty_selected_evaluation_refresh_count),
       Rcpp::Named("cuda_multi_penalty_stability_replay_target_count") =
         static_cast<double>(
           diagnostics.cuda_multi_penalty_stability_replay_target_count),
@@ -7092,6 +8188,105 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
       Rcpp::Named("cuda_multi_penalty_exact_primary_target_count") =
         static_cast<double>(
           diagnostics.cuda_multi_penalty_exact_primary_target_count),
+      Rcpp::Named("exact_primary_fixed_reuse_requested") =
+        diagnostics.exact_primary_fixed_reuse_requested,
+      Rcpp::Named("exact_primary_coefficient_parity_diagnostic_enabled") =
+        diagnostics.exact_primary_coefficient_parity_diagnostic_enabled,
+      Rcpp::Named("exact_primary_coefficient_parity_batch_count") =
+        diagnostics.exact_primary_coefficient_parity_batch_count,
+      Rcpp::Named(
+        "exact_primary_coefficient_parity_coefficient_mismatch_batch_count") =
+          diagnostics
+            .exact_primary_coefficient_parity_coefficient_mismatch_batch_count,
+      Rcpp::Named(
+        "exact_primary_coefficient_parity_fitted_mismatch_batch_count") =
+          diagnostics
+            .exact_primary_coefficient_parity_fitted_mismatch_batch_count,
+      Rcpp::Named(
+        "exact_primary_coefficient_parity_residual_mismatch_batch_count") =
+          diagnostics
+            .exact_primary_coefficient_parity_residual_mismatch_batch_count,
+      Rcpp::Named("exact_primary_coefficient_parity_max_coefficient_error") =
+        diagnostics.exact_primary_coefficient_parity_max_coefficient_error,
+      Rcpp::Named("exact_primary_coefficient_parity_max_fitted_error") =
+        diagnostics.exact_primary_coefficient_parity_max_fitted_error,
+      Rcpp::Named("exact_primary_coefficient_parity_max_residual_error") =
+        diagnostics.exact_primary_coefficient_parity_max_residual_error,
+      Rcpp::Named("exact_primary_fixed_reuse_hit_batch_count") =
+        diagnostics.exact_primary_fixed_reuse_hit_batch_count,
+      Rcpp::Named("exact_primary_fixed_reuse_hit_target_count") =
+        diagnostics.exact_primary_fixed_reuse_hit_target_count,
+      Rcpp::Named("exact_primary_fixed_reuse_fallback_batch_count") =
+        diagnostics.exact_primary_fixed_reuse_fallback_batch_count,
+      Rcpp::Named("exact_primary_fixed_reuse_fallback_target_count") =
+        diagnostics.exact_primary_fixed_reuse_fallback_target_count,
+      Rcpp::Named("exact_primary_fixed_reuse_arena_level_count") =
+        static_cast<double>(
+          diagnostics.exact_primary_fixed_reuse_arena_level_count),
+      Rcpp::Named("exact_primary_fixed_reuse_store_batch_count") =
+        static_cast<double>(
+          diagnostics.exact_primary_fixed_reuse_store_batch_count),
+      Rcpp::Named("exact_primary_fixed_reuse_store_target_count") =
+        static_cast<double>(
+          diagnostics.exact_primary_fixed_reuse_store_target_count),
+      Rcpp::Named("exact_primary_fixed_reuse_store_window_sync_count") =
+        static_cast<double>(
+          diagnostics.exact_primary_fixed_reuse_store_window_sync_count),
+      Rcpp::Named("exact_primary_fixed_reuse_arena_peak_live_target_count") =
+        static_cast<double>(
+          diagnostics.exact_primary_fixed_reuse_peak_live_target_count),
+      Rcpp::Named(
+        "exact_primary_fixed_reuse_coefficient_store_d2d_bytes") =
+          static_cast<double>(diagnostics
+            .exact_primary_fixed_reuse_coefficient_store_d2d_bytes),
+      Rcpp::Named(
+        "exact_primary_fixed_reuse_coefficient_gather_copy_count") =
+          static_cast<double>(diagnostics
+            .exact_primary_fixed_reuse_coefficient_gather_copy_count),
+      Rcpp::Named(
+        "exact_primary_fixed_reuse_coefficient_gather_d2d_bytes") =
+          static_cast<double>(diagnostics
+            .exact_primary_fixed_reuse_coefficient_gather_d2d_bytes),
+      Rcpp::Named("exact_primary_fixed_reuse_peak_device_bytes") =
+        static_cast<double>(
+          diagnostics.exact_primary_fixed_reuse_peak_device_bytes),
+      Rcpp::Named("exact_primary_fixed_reuse_allocation_count") =
+        static_cast<double>(
+          diagnostics.exact_primary_fixed_reuse_allocation_count),
+      Rcpp::Named("exact_primary_fixed_reuse_free_count") =
+        static_cast<double>(diagnostics.exact_primary_fixed_reuse_free_count),
+      Rcpp::Named("exact_primary_fixed_reuse_live_device_bytes_after") =
+        static_cast<double>(
+          diagnostics.exact_primary_fixed_reuse_live_device_bytes_after),
+      Rcpp::Named("exact_primary_fixed_reuse_store_host_ms") =
+        diagnostics.exact_primary_fixed_reuse_store_host_ms,
+      Rcpp::Named(
+        "exact_primary_fixed_reuse_coefficient_gather_host_ms") =
+          diagnostics.exact_primary_fixed_reuse_coefficient_gather_host_ms,
+      Rcpp::Named(
+        "exact_primary_fixed_reuse_finalization_submit_host_ms") =
+          diagnostics.exact_primary_fixed_reuse_finalization_submit_host_ms,
+      Rcpp::Named("exact_primary_fixed_reuse_key_diagnostic_enabled") =
+        diagnostics.exact_primary_fixed_reuse_key_diagnostic_enabled,
+      Rcpp::Named("exact_primary_fixed_reuse_produced_key_count") =
+        static_cast<double>(exact_primary_fixed_reuse_produced_count),
+      Rcpp::Named("exact_primary_fixed_reuse_request_target_count") =
+        static_cast<double>(exact_primary_fixed_reuse_request_count),
+      Rcpp::Named("exact_primary_fixed_reuse_matched_target_count") =
+        static_cast<double>(exact_primary_fixed_reuse_request_count -
+          exact_primary_fixed_reuse_missing_count),
+      Rcpp::Named("exact_primary_fixed_reuse_missing_target_count") =
+        static_cast<double>(exact_primary_fixed_reuse_missing_count),
+      Rcpp::Named("exact_primary_fixed_reuse_unique_requested_key_count") =
+        static_cast<double>(exact_primary_fixed_reuse_unique_request_count),
+      Rcpp::Named("exact_primary_fixed_reuse_unconsumed_key_count") =
+        static_cast<double>(exact_primary_fixed_reuse_produced_count -
+          exact_primary_fixed_reuse_unique_request_count),
+      Rcpp::Named("exact_primary_fixed_reuse_duplicate_producer_count") =
+        static_cast<double>(
+          diagnostics.exact_primary_fixed_reuse_duplicate_producer_count),
+      Rcpp::Named("exact_primary_fixed_reuse_peak_live_target_count") =
+        static_cast<double>(exact_primary_fixed_reuse_peak_live_count),
       Rcpp::Named("cuda_multi_penalty_hessian_eigensolver_count") =
         static_cast<double>(
           diagnostics.cuda_multi_penalty_hessian_eigensolver_count),

@@ -75,6 +75,7 @@ struct MultiPenaltyGcvCudaDiagnostics {
   int cuda_guarded_qr_evaluation_count = 0;
   int cuda_stable_svd_evaluation_count = 0;
   int cuda_selected_evaluation_reuse_count = 0;
+  int cuda_selected_evaluation_refresh_count = 0;
   int cuda_stability_replay_kernel_launch_count = 0;
   int cuda_stability_merge_kernel_launch_count = 0;
   int cuda_stability_replay_target_count = 0;
@@ -301,6 +302,7 @@ struct MultiPenaltyGcvCudaOptimizerControl {
   int decomposition_trace_capacity_per_target = 0;
   bool force_stability_replay_all = false;
   bool exact_primary_only = false;
+  bool force_final_selected_evaluation = false;
 };
 
 struct MultiPenaltyGcvCudaOptimization {
@@ -379,7 +381,9 @@ struct MultiPenaltyGcvCudaResidualInfo {
 
 struct MultiPenaltyGcvCudaResidualConsumerView {
   const double* residuals = nullptr;
+  const double* coefficients = nullptr;
   int n = 0;
+  int coefficient_dim = 0;
   int target_count = 0;
   int device_id = -1;
   cudaStream_t producer_stream = nullptr;
@@ -387,7 +391,21 @@ struct MultiPenaltyGcvCudaResidualConsumerView {
   std::vector<std::string> target_keys;
   std::vector<int> solver_info;
   std::vector<int> decomposition_route;
+  std::vector<int> numerical_rank;
   bool fixed_sp_evaluation = false;
+};
+
+struct MultiPenaltyGcvCudaCoefficientConsumerView {
+  const double* coefficients = nullptr;
+  int coefficient_dim = 0;
+  int target_count = 0;
+  int device_id = -1;
+  cudaStream_t producer_stream = nullptr;
+  cudaEvent_t producer_completion_event = nullptr;
+  std::vector<std::string> target_keys;
+  std::vector<int> solver_info;
+  std::vector<int> decomposition_route;
+  std::vector<int> numerical_rank;
 };
 
 struct MultiPenaltyGcvCudaResidualShadow {
@@ -565,6 +583,15 @@ multi_penalty_gcv_cuda_evaluate_fixed_batch(
     int target_count,
     const std::vector<std::string>& target_keys,
     double rank_tolerance);
+
+std::shared_ptr<MultiPenaltyGcvCudaResidualBatch>
+multi_penalty_gcv_cuda_finalize_selected_coefficients(
+    const std::shared_ptr<MultiPenaltyGcvCudaPrepared>& prepared,
+    const double* Y,
+    const MultiPenaltyGcvCudaCoefficientConsumerView& coefficients,
+    int n,
+    int target_count,
+    const std::vector<std::string>& target_keys);
 
 MultiPenaltyGcvCudaMultiResult multi_penalty_gcv_cuda_optimize_multi(
     std::vector<MultiPenaltyGcvCudaMultiRequest> requests,

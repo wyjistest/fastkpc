@@ -21,6 +21,18 @@ fixed_sp_finalize <- identical(
 force_stability_replay_all <- identical(
   Sys.getenv("FASTKPC_FORCE_STABILITY_REPLAY_ALL", unset = "0"), "1"
 )
+primary_fixed_reuse_diagnostic <- identical(
+  Sys.getenv(
+    "FASTKPC_SELECTED_SP_PRIMARY_FIXED_REUSE_DIAGNOSTIC", unset = "0"
+  ),
+  "1"
+)
+if (primary_fixed_reuse_diagnostic && !fixed_sp_finalize) {
+  stop(
+    "primary/fixed reuse diagnostic requires fixed-SP finalization",
+    call. = FALSE
+  )
+}
 
 if (!file.exists(input_path)) stop("source receipt is missing", call. = FALSE)
 if (file.exists(output_path)) stop("output already exists", call. = FALSE)
@@ -94,7 +106,7 @@ for (source_index in requested_indices) {
   )
   q <- ncol(native_setup$X)
   capacity <- NULL
-  if (q > 80L) {
+  if (q > 80L || primary_fixed_reuse_diagnostic) {
     if (!fixed_sp_finalize) next
     geometry <- full_cuda_ci_native_geometry_prepare_native(
       native_setup$X, native_setup$penalty_blocks,
@@ -103,8 +115,25 @@ for (source_index in requested_indices) {
     capacity <- full_cuda_ci_multi_penalty_capacity_qualify_native(
       native_setup, geometry, Y
     )
+    if (primary_fixed_reuse_diagnostic) {
+      if (!isTRUE(capacity$diagnostics$exact_primary_only) ||
+          !isTRUE(capacity$optimizer_device_resident_before_release) ||
+          !isTRUE(capacity$optimizer_residual_slot_released) ||
+          isTRUE(capacity$optimizer_fixed_sp_evaluation)) {
+        stop(
+          "exact-primary residual ownership qualification failed",
+          call. = FALSE
+        )
+      }
+    }
     optimization <- list(
       selected_log_sp = capacity$selected_log_sp,
+      coefficients = capacity$optimizer_coefficients,
+      fitted = capacity$optimizer_fitted,
+      residuals = capacity$optimizer_residuals,
+      solver_info = capacity$optimizer_solver_info,
+      decomposition_route = capacity$optimizer_decomposition_route,
+      numerical_rank = capacity$optimizer_numerical_rank,
       diagnostics = capacity$diagnostics
     )
     finalization <- list(
@@ -141,6 +170,75 @@ for (source_index in requested_indices) {
   reference_residuals <- unname(source_detail$residuals$legacy_auto)
   candidate_p <- p_value(residuals)
   reference_p <- p_value(reference_residuals)
+  optimizer_fixed_log_sp_bitwise <- if (primary_fixed_reuse_diagnostic) {
+    identical(
+      as.double(capacity$selected_log_sp), as.double(capacity$fixed_log_sp)
+    )
+  } else {
+    NA
+  }
+  optimizer_fixed_solver_info_exact <- if (
+    primary_fixed_reuse_diagnostic
+  ) {
+    identical(
+      as.integer(capacity$optimizer_solver_info),
+      as.integer(capacity$fixed_solver_info)
+    )
+  } else {
+    NA
+  }
+  optimizer_fixed_route_exact <- if (primary_fixed_reuse_diagnostic) {
+    identical(
+      as.integer(capacity$optimizer_decomposition_route),
+      as.integer(capacity$fixed_decomposition_route)
+    )
+  } else {
+    NA
+  }
+  optimizer_fixed_rank_exact <- if (primary_fixed_reuse_diagnostic) {
+    identical(
+      as.integer(capacity$optimizer_numerical_rank),
+      as.integer(capacity$fixed_numerical_rank)
+    )
+  } else {
+    NA
+  }
+  optimizer_fixed_coefficient_bitwise <- if (
+    primary_fixed_reuse_diagnostic
+  ) {
+    identical(
+      as.double(capacity$optimizer_coefficients),
+      as.double(capacity$fixed_coefficients)
+    )
+  } else {
+    NA
+  }
+  optimizer_fixed_fitted_bitwise <- if (primary_fixed_reuse_diagnostic) {
+    identical(
+      as.double(capacity$optimizer_fitted),
+      as.double(capacity$fixed_fitted)
+    )
+  } else {
+    NA
+  }
+  optimizer_fixed_residual_bitwise <- if (primary_fixed_reuse_diagnostic) {
+    identical(
+      as.double(capacity$optimizer_residuals),
+      as.double(capacity$fixed_residuals)
+    )
+  } else {
+    NA
+  }
+  optimizer_p <- if (primary_fixed_reuse_diagnostic) {
+    p_value(capacity$optimizer_residuals)
+  } else {
+    NA_real_
+  }
+  optimizer_fixed_p_bitwise <- if (primary_fixed_reuse_diagnostic) {
+    identical(optimizer_p, candidate_p)
+  } else {
+    NA
+  }
   row <- data.frame(
     source_index = source_index,
     dataset = dataset,
@@ -162,6 +260,39 @@ for (source_index in requested_indices) {
     candidate_p = candidate_p,
     p_value_error = candidate_p - reference_p,
     contract_passed = abs(candidate_p - reference_p) <= 1e-10,
+    optimizer_fixed_log_sp_bitwise = optimizer_fixed_log_sp_bitwise,
+    optimizer_fixed_solver_info_exact = optimizer_fixed_solver_info_exact,
+    optimizer_fixed_route_exact = optimizer_fixed_route_exact,
+    optimizer_fixed_rank_exact = optimizer_fixed_rank_exact,
+    optimizer_fixed_coefficient_bitwise =
+      optimizer_fixed_coefficient_bitwise,
+    optimizer_fixed_fitted_bitwise = optimizer_fixed_fitted_bitwise,
+    optimizer_fixed_residual_bitwise = optimizer_fixed_residual_bitwise,
+    optimizer_fixed_p_bitwise = optimizer_fixed_p_bitwise,
+    optimizer_fixed_max_coefficient_error = if (
+      primary_fixed_reuse_diagnostic
+    ) {
+      max(abs(
+        capacity$optimizer_coefficients - capacity$fixed_coefficients
+      ))
+    } else {
+      NA_real_
+    },
+    optimizer_fixed_max_fitted_error = if (
+      primary_fixed_reuse_diagnostic
+    ) {
+      max(abs(capacity$optimizer_fitted - capacity$fixed_fitted))
+    } else {
+      NA_real_
+    },
+    optimizer_fixed_max_residual_error = if (
+      primary_fixed_reuse_diagnostic
+    ) {
+      max(abs(capacity$optimizer_residuals - capacity$fixed_residuals))
+    } else {
+      NA_real_
+    },
+    optimizer_fixed_p_error = optimizer_p - candidate_p,
     cpu_objective_count = optimization$diagnostics$cpu_objective_count,
     finalization_cpu_objective_count = if (fixed_sp_finalize) {
       finalization$diagnostics$cpu_objective_count
@@ -200,7 +331,11 @@ for (source_index in requested_indices) {
 rows <- do.call(rbind, rows)
 receipt <- list(
   schema_version = if (fixed_sp_finalize) {
-    "mgcv-gpu-selected-sp-fixed-finalization-qualification-v2"
+    if (primary_fixed_reuse_diagnostic) {
+      "mgcv-gpu-exact-primary-fixed-reuse-qualification-v1"
+    } else {
+      "mgcv-gpu-selected-sp-fixed-finalization-qualification-v2"
+    }
   } else {
     "mgcv-gpu-selected-sp-optimizer-qualification-v2"
   },
@@ -211,6 +346,7 @@ receipt <- list(
   source_receipt = normalizePath(input_path),
   fixed_sp_finalize = fixed_sp_finalize,
   force_stability_replay_all = force_stability_replay_all,
+  primary_fixed_reuse_diagnostic = primary_fixed_reuse_diagnostic,
   rows = rows,
   details = details,
   summary = list(
@@ -221,6 +357,32 @@ receipt <- list(
     max_sp_relative_error = max(rows$max_sp_relative_error),
     max_residual_error = max(rows$max_residual_error),
     max_abs_p_value_error = max(abs(rows$p_value_error)),
+    optimizer_fixed_identity_count = if (primary_fixed_reuse_diagnostic) {
+      sum(
+        rows$optimizer_fixed_log_sp_bitwise &
+          rows$optimizer_fixed_solver_info_exact &
+          rows$optimizer_fixed_route_exact &
+          rows$optimizer_fixed_rank_exact &
+          rows$optimizer_fixed_coefficient_bitwise &
+          rows$optimizer_fixed_fitted_bitwise &
+          rows$optimizer_fixed_residual_bitwise &
+          rows$optimizer_fixed_p_bitwise
+      )
+    } else {
+      NA_integer_
+    },
+    optimizer_fixed_max_coefficient_error = if (
+      primary_fixed_reuse_diagnostic
+    ) max(rows$optimizer_fixed_max_coefficient_error) else NA_real_,
+    optimizer_fixed_max_fitted_error = if (
+      primary_fixed_reuse_diagnostic
+    ) max(rows$optimizer_fixed_max_fitted_error) else NA_real_,
+    optimizer_fixed_max_residual_error = if (
+      primary_fixed_reuse_diagnostic
+    ) max(rows$optimizer_fixed_max_residual_error) else NA_real_,
+    optimizer_fixed_max_abs_p_error = if (
+      primary_fixed_reuse_diagnostic
+    ) max(abs(rows$optimizer_fixed_p_error)) else NA_real_,
     cpu_authority_count = sum(
       rows$cpu_objective_count + rows$finalization_cpu_objective_count
     ),

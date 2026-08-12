@@ -30,6 +30,8 @@ constexpr char kOptimizerResidualProducerSemanticIdentity[] =
   "full-cuda-ci-multi-penalty-optimizer-accepted-residual-v1";
 constexpr char kFixedEvaluatorResidualProducerSemanticIdentity[] =
   "full-cuda-ci-mgcv-exact-fixed-evaluator-residual-v1";
+constexpr char kExactPrimaryReuseResidualProducerSemanticIdentity[] =
+  "full-cuda-ci-mgcv-exact-primary-fixed-reuse-residual-v1";
 constexpr char kLegacyComponentCacheResidualBypassSemanticIdentity[] =
   "full-cuda-ci-legacy-component-cache-residual-bypass-v1";
 
@@ -3830,6 +3832,36 @@ run_full_cuda_ci_phase35_legacy_eig_batch_from_fixed_evaluator_residual(
   for (FullCudaCiCompactHostRecord& record : result.records) {
     record.solver_route =
       "MGCV_EXACT_STABLE_SVD|MGCV_EXACT_STABLE_SVD";
+    record.optimizer_status = "LIVE_CUDA_GCV_ACCEPTED";
+  }
+  return result;
+}
+
+FullCudaCiLegacyEigBatchResult
+run_full_cuda_ci_phase35_legacy_eig_batch_from_exact_primary_reuse_residual(
+    const std::shared_ptr<PreparedSGpuHandle>& prepared_s,
+    const MultiPenaltyGcvCudaResidualConsumerView& residual_view,
+    const FullCudaCiLegacyEigBatchRequest& request,
+    const std::shared_ptr<FullCudaCiLegacyEigComponentCache>& cache) {
+  if (!residual_view.fixed_sp_evaluation) {
+    throw std::runtime_error(
+      "legacy eig exact-primary reuse residual identity is missing");
+  }
+  const PreparedSInfo prepared_info = prepared_s_gpu_info(prepared_s);
+  FixedSpBatchHostView batch;
+  batch.n = residual_view.n;
+  batch.null_dim = prepared_info.null_dim;
+  batch.penalty_count = prepared_info.penalty_count;
+  batch.target_count = residual_view.target_count;
+  batch.output_mask = FixedSpOutputResiduals;
+  batch.target_keys = residual_view.target_keys;
+  FullCudaCiLegacyEigBatchResult result =
+    run_full_cuda_ci_phase35_legacy_eig_batch_impl(
+      prepared_s, batch, request, &residual_view,
+      kExactPrimaryReuseResidualProducerSemanticIdentity, cache);
+  for (FullCudaCiCompactHostRecord& record : result.records) {
+    record.solver_route =
+      "MGCV_EXACT_PRIMARY_REUSE|MGCV_EXACT_PRIMARY_REUSE";
     record.optimizer_status = "LIVE_CUDA_GCV_ACCEPTED";
   }
   return result;

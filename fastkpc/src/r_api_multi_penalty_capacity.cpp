@@ -145,9 +145,20 @@ extern "C" SEXP C_full_cuda_ci_multi_penalty_capacity_qualify(
       "capacity-qualification-target-" + std::to_string(target + 1));
   }
   fastkpc::MultiPenaltyGcvCudaOptimizerControl control;
-  const fastkpc::MultiPenaltyGcvCudaOptimization result =
-    fastkpc::multi_penalty_gcv_capacity_optimize_batch(
+  fastkpc::MultiPenaltyGcvCapacityBatchResult optimized =
+    fastkpc::multi_penalty_gcv_capacity_optimize_batch_with_residual(
       prepared, Y.begin(), n, target_count, target_keys, control);
+  const fastkpc::MultiPenaltyGcvCudaOptimization& result =
+    optimized.optimization;
+  const fastkpc::MultiPenaltyGcvCudaResidualInfo optimizer_info =
+    fastkpc::multi_penalty_gcv_capacity_residual_info(optimized.residual);
+  const fastkpc::MultiPenaltyGcvCudaResidualShadow optimizer_shadow =
+    fastkpc::materialize_multi_penalty_gcv_capacity_residual_shadow(
+      optimized.residual);
+  fastkpc::release_multi_penalty_gcv_capacity_residual(optimized.residual);
+  optimized.residual.reset();
+  const fastkpc::MultiPenaltyGcvCudaPreparedInfo prepared_after_optimizer =
+    fastkpc::multi_penalty_gcv_capacity_prepared_info(prepared);
   std::vector<double> evaluated_log_sp = result.selected_log_sp;
   if (!Rf_isNull(fixed_log_sp_s)) {
     Rcpp::NumericMatrix fixed_log_sp(fixed_log_sp_s);
@@ -207,6 +218,16 @@ extern "C" SEXP C_full_cuda_ci_multi_penalty_capacity_qualify(
   Rcpp::NumericMatrix fixed_coefficients(q, target_count);
   Rcpp::NumericMatrix fixed_fitted(n, target_count);
   Rcpp::NumericMatrix fixed_residuals(n, target_count);
+  Rcpp::NumericMatrix optimizer_coefficients(q, target_count);
+  Rcpp::NumericMatrix optimizer_fitted(n, target_count);
+  Rcpp::NumericMatrix optimizer_residuals(n, target_count);
+  std::copy(optimizer_shadow.coefficients.begin(),
+            optimizer_shadow.coefficients.end(),
+            optimizer_coefficients.begin());
+  std::copy(optimizer_shadow.fitted.begin(), optimizer_shadow.fitted.end(),
+            optimizer_fitted.begin());
+  std::copy(optimizer_shadow.residuals.begin(),
+            optimizer_shadow.residuals.end(), optimizer_residuals.begin());
   std::copy(fixed_shadow.coefficients.begin(), fixed_shadow.coefficients.end(),
             fixed_coefficients.begin());
   std::copy(fixed_shadow.fitted.begin(), fixed_shadow.fitted.end(),
@@ -225,6 +246,21 @@ extern "C" SEXP C_full_cuda_ci_multi_penalty_capacity_qualify(
     Rcpp::Named("target_count") = result.target_count,
     Rcpp::Named("selected_log_sp") = selected_log_sp,
     Rcpp::Named("fixed_log_sp") = fixed_log_sp,
+    Rcpp::Named("optimizer_solver_info") =
+      Rcpp::wrap(optimizer_info.solver_info),
+    Rcpp::Named("optimizer_decomposition_route") =
+      Rcpp::wrap(optimizer_info.decomposition_route),
+    Rcpp::Named("optimizer_numerical_rank") =
+      Rcpp::wrap(optimizer_info.numerical_rank),
+    Rcpp::Named("optimizer_fixed_sp_evaluation") =
+      optimizer_info.fixed_sp_evaluation,
+    Rcpp::Named("optimizer_device_resident_before_release") =
+      optimizer_info.device_resident,
+    Rcpp::Named("optimizer_residual_slot_released") =
+      !prepared_after_optimizer.residual_slot_leased,
+    Rcpp::Named("optimizer_coefficients") = optimizer_coefficients,
+    Rcpp::Named("optimizer_fitted") = optimizer_fitted,
+    Rcpp::Named("optimizer_residuals") = optimizer_residuals,
     Rcpp::Named("selected_rss") = Rcpp::wrap(result.rss),
     Rcpp::Named("selected_edf") = Rcpp::wrap(result.edf),
     Rcpp::Named("selected_score") = Rcpp::wrap(result.score),

@@ -169,6 +169,72 @@ exact_primary_optimizer_gate <- isTRUE(
   as.numeric(summary$cuda_multi_penalty_stability_replay_target_count) == 0 &&
   as.numeric(summary$cuda_multi_penalty_stability_replay_selected_count) == 0 &&
   as.numeric(summary$cuda_multi_penalty_terminal_confirmation_count) == 0
+fixed_reuse_enabled <- isTRUE(summary$exact_primary_fixed_reuse_requested)
+fixed_reuse_fields <- list(
+  selected_evaluation_reuse_count =
+    summary$cuda_multi_penalty_selected_evaluation_reuse_count,
+  selected_evaluation_refresh_count =
+    summary$cuda_multi_penalty_selected_evaluation_refresh_count,
+  exact_primary_target_count =
+    summary$cuda_multi_penalty_exact_primary_target_count,
+  exact_fixed_target_count = summary$cuda_exact_fixed_evaluator_target_count,
+  exact_fixed_stable_svd_target_count =
+    summary$cuda_exact_fixed_evaluator_stable_svd_target_count,
+  hit_batch_count = summary$exact_primary_fixed_reuse_hit_batch_count,
+  hit_target_count = summary$exact_primary_fixed_reuse_hit_target_count,
+  fallback_batch_count =
+    summary$exact_primary_fixed_reuse_fallback_batch_count,
+  fallback_target_count =
+    summary$exact_primary_fixed_reuse_fallback_target_count,
+  store_target_count = summary$exact_primary_fixed_reuse_store_target_count,
+  coefficient_store_d2d_bytes =
+    summary$exact_primary_fixed_reuse_coefficient_store_d2d_bytes,
+  coefficient_gather_copy_count =
+    summary$exact_primary_fixed_reuse_coefficient_gather_copy_count,
+  coefficient_gather_d2d_bytes =
+    summary$exact_primary_fixed_reuse_coefficient_gather_d2d_bytes,
+  peak_device_bytes = summary$exact_primary_fixed_reuse_peak_device_bytes,
+  allocation_count = summary$exact_primary_fixed_reuse_allocation_count,
+  free_count = summary$exact_primary_fixed_reuse_free_count,
+  live_device_bytes_after =
+    summary$exact_primary_fixed_reuse_live_device_bytes_after
+)
+fixed_reuse_accounted <- if (fixed_reuse_enabled) {
+  fixed_reuse_fields[["selected_evaluation_reuse_count"]] == 0 &&
+    fixed_reuse_fields[["selected_evaluation_refresh_count"]] > 0 &&
+    fixed_reuse_fields[["store_target_count"]] ==
+      fixed_reuse_fields[["exact_primary_target_count"]] &&
+    fixed_reuse_fields[["hit_batch_count"]] > 0 &&
+    fixed_reuse_fields[["hit_target_count"]] > 0 &&
+    fixed_reuse_fields[["fallback_batch_count"]] == 0 &&
+    fixed_reuse_fields[["fallback_target_count"]] == 0 &&
+    fixed_reuse_fields[["coefficient_store_d2d_bytes"]] > 0 &&
+    fixed_reuse_fields[["coefficient_gather_copy_count"]] ==
+      fixed_reuse_fields[["hit_target_count"]] &&
+    fixed_reuse_fields[["coefficient_gather_d2d_bytes"]] > 0 &&
+    fixed_reuse_fields[["peak_device_bytes"]] > 0 &&
+    fixed_reuse_fields[["allocation_count"]] ==
+      fixed_reuse_fields[["free_count"]] &&
+    fixed_reuse_fields[["live_device_bytes_after"]] == 0 &&
+    fixed_reuse_fields[["exact_fixed_target_count"]] ==
+      fixed_reuse_fields[["exact_fixed_stable_svd_target_count"]]
+} else {
+  all(unlist(fixed_reuse_fields[c(
+    "selected_evaluation_refresh_count",
+    "hit_batch_count",
+    "hit_target_count",
+    "fallback_batch_count",
+    "fallback_target_count",
+    "store_target_count",
+    "coefficient_store_d2d_bytes",
+    "coefficient_gather_copy_count",
+    "coefficient_gather_d2d_bytes",
+    "peak_device_bytes",
+    "allocation_count",
+    "free_count",
+    "live_device_bytes_after"
+  )], use.names = FALSE) == 0)
+}
 cache_enabled <- summary$legacy_component_cache_requested_budget_bytes > 0
 cache_fields <- list(
   requested_budget_bytes = summary$legacy_component_cache_requested_budget_bytes,
@@ -273,6 +339,10 @@ audit <- list(
   authority_zero = authority_zero,
   gpu_route_gate = gpu_route_gate,
   exact_primary_optimizer_gate = exact_primary_optimizer_gate,
+  exact_primary_fixed_reuse = c(
+    list(enabled = fixed_reuse_enabled, accounted = fixed_reuse_accounted),
+    as.list(fixed_reuse_fields)
+  ),
   authority_gate_pass = isTRUE(summary$authority_gate_pass),
   legacy_component_cache = c(
     list(enabled = cache_enabled, accounted = cache_accounted),
@@ -286,6 +356,7 @@ audit$pass <- isTRUE(audit$task_identity_exact) && isTRUE(audit$ci$pass) &&
   isTRUE(audit$n_edgetests_exact) &&
   all(audit$authority_zero) && isTRUE(audit$gpu_route_gate) &&
   isTRUE(audit$exact_primary_optimizer_gate) &&
+  isTRUE(audit$exact_primary_fixed_reuse$accounted) &&
   isTRUE(audit$authority_gate_pass) &&
   isTRUE(audit$legacy_component_cache$accounted) &&
   isTRUE(audit$vertical_resource_closed)

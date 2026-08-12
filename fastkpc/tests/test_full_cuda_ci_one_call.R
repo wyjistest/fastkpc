@@ -321,7 +321,8 @@ assert_named_true(
     prepared_build_accounting =
       multi_summary$cuda_multi_penalty_prepared_build_count ==
         multi_summary$cuda_multi_penalty_optimizer_setup_count +
-          multi_summary$cuda_exact_fixed_evaluator_batch_count,
+          multi_summary$cuda_exact_fixed_evaluator_batch_count +
+          multi_summary$exact_primary_fixed_reuse_hit_batch_count,
     prepared_release_accounting =
       multi_summary$cuda_multi_penalty_prepared_release_count ==
         multi_summary$cuda_multi_penalty_prepared_build_count,

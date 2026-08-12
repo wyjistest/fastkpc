@@ -586,6 +586,7 @@ struct DeviceOptimizerState {
   int trial_requires_complete_evaluation;
   int trial_accepted;
   int selected_evaluation_reuse_count;
+  int selected_evaluation_refresh_count;
   int ambiguous_step_descent_count;
   int ambiguous_step_non_descent_count;
   int stability_replay_attempted;
@@ -2386,6 +2387,7 @@ __global__ void optimize_multi_penalty_targets_kernel(
     bool stability_replay,
     bool force_stability_replay_all,
     bool force_stable_svd,
+    bool force_final_selected_evaluation,
     DeviceDecompositionTraceRecord* decomposition_trace,
     unsigned int* decomposition_trace_counters,
     unsigned int decomposition_trace_capacity) {
@@ -2453,6 +2455,7 @@ __global__ void optimize_multi_penalty_targets_kernel(
     state->trial_requires_complete_evaluation = 0;
     state->trial_accepted = 0;
     state->selected_evaluation_reuse_count = 0;
+    state->selected_evaluation_refresh_count = 0;
     state->ambiguous_step_descent_count = 0;
     state->ambiguous_step_non_descent_count = 0;
     state->stability_replay_attempted = stability_replay ? 1 : 0;
@@ -3182,12 +3185,16 @@ __global__ void optimize_multi_penalty_targets_kernel(
   }
   __syncthreads();
 
-  if (state->boundary_accepted_count == 0) {
+  if (state->boundary_accepted_count == 0 &&
+      !force_final_selected_evaluation) {
     if (threadIdx.x == 0) {
       ++state->objective_calls;
       state->selected_evaluation_reuse_count = 1;
     }
     return;
+  }
+  if (state->boundary_accepted_count == 0 && threadIdx.x == 0) {
+    state->selected_evaluation_refresh_count = 1;
   }
 
   evaluate_multi_penalty_target_device(
@@ -3540,6 +3547,8 @@ MultiPenaltyGcvCudaOptimization materialize_optimizer_output(
       state.phase_timing.stable_svd_evaluation_count;
     diagnostics.cuda_selected_evaluation_reuse_count +=
       state.selected_evaluation_reuse_count;
+    diagnostics.cuda_selected_evaluation_refresh_count +=
+      state.selected_evaluation_refresh_count;
     diagnostics.cuda_terminal_boundary_confirmation_count +=
       state.terminal_boundary_confirmation_count;
     diagnostics.cuda_terminal_boundary_confirmation_accepted_count +=
@@ -5037,6 +5046,10 @@ MultiPenaltyGcvCudaOptimization multi_penalty_gcv_optimize_cuda(
     initial_log_sp, initial_log_sp + penalty_count);
   const bool exact_primary_only = control.exact_primary_only ||
     exact_primary_test_override();
+  if (control.force_final_selected_evaluation && !exact_primary_only) {
+    throw std::runtime_error(
+      "final selected evaluation requires exact-primary optimization");
+  }
   MultiPenaltyGcvCudaDiagnostics& diagnostics = output.diagnostics;
   diagnostics.schema_version =
     "full-cuda-ci-multi-penalty-gcv-cuda-diagnostics-v1";
@@ -5136,7 +5149,7 @@ MultiPenaltyGcvCudaOptimization multi_penalty_gcv_optimize_cuda(
       control.max_iterations, control.max_newton_step,
       control.boundary_probe_step, control.max_boundary_probes,
       control.rank_tolerance, false, false, exact_primary_only,
-      nullptr, nullptr, 0U);
+      control.force_final_selected_evaluation, nullptr, nullptr, 0U);
   check_cuda(cudaGetLastError(),
              "launch multi-penalty optimizer batch kernel");
   if (!exact_primary_only) {
@@ -5150,7 +5163,8 @@ MultiPenaltyGcvCudaOptimization multi_penalty_gcv_optimize_cuda(
         control.max_step_halving, control.max_iterations,
         control.max_newton_step, control.boundary_probe_step,
         control.max_boundary_probes, control.rank_tolerance, true,
-        control.force_stability_replay_all, true, nullptr, nullptr, 0U);
+        control.force_stability_replay_all, true, false,
+        nullptr, nullptr, 0U);
     check_cuda(cudaGetLastError(),
                "launch multi-penalty stability replay kernel");
     diagnostics.cuda_stability_replay_kernel_launch_count = 1;
@@ -5263,6 +5277,8 @@ MultiPenaltyGcvCudaOptimization multi_penalty_gcv_optimize_cuda(
       state.phase_timing.stable_svd_evaluation_count;
     diagnostics.cuda_selected_evaluation_reuse_count +=
       state.selected_evaluation_reuse_count;
+    diagnostics.cuda_selected_evaluation_refresh_count +=
+      state.selected_evaluation_refresh_count;
     diagnostics.cuda_terminal_boundary_confirmation_count +=
       state.terminal_boundary_confirmation_count;
     diagnostics.cuda_terminal_boundary_confirmation_accepted_count +=
@@ -5692,6 +5708,10 @@ MultiPenaltyGcvCudaBatchResult multi_penalty_gcv_cuda_optimize_batch(
     const int penalty_count = prepared->penalty_count;
     const bool exact_primary_only = control.exact_primary_only ||
       exact_primary_test_override();
+    if (control.force_final_selected_evaluation && !exact_primary_only) {
+      throw std::runtime_error(
+        "final selected evaluation requires exact-primary optimization");
+    }
     const std::size_t y_count =
       static_cast<std::size_t>(n) * target_count;
     MultiPenaltyGcvCudaDiagnostics diagnostics;
@@ -5784,7 +5804,8 @@ MultiPenaltyGcvCudaBatchResult multi_penalty_gcv_cuda_optimize_batch(
         control.max_step_halving, control.max_iterations,
         control.max_newton_step, control.boundary_probe_step,
         control.max_boundary_probes, control.rank_tolerance, false, false,
-        exact_primary_only, decomposition_trace,
+        exact_primary_only, control.force_final_selected_evaluation,
+        decomposition_trace,
         decomposition_trace_counters, decomposition_trace_capacity);
     check_cuda(cudaGetLastError(),
                "launch persistent multi-penalty optimizer kernel");
@@ -5802,7 +5823,7 @@ MultiPenaltyGcvCudaBatchResult multi_penalty_gcv_cuda_optimize_batch(
           control.max_iterations, control.max_newton_step,
           control.boundary_probe_step, control.max_boundary_probes,
           control.rank_tolerance, true,
-          control.force_stability_replay_all, true,
+          control.force_stability_replay_all, true, false,
           decomposition_trace, decomposition_trace_counters,
           decomposition_trace_capacity);
       check_cuda(cudaGetLastError(),
@@ -5911,6 +5932,16 @@ MultiPenaltyGcvCudaBatchResult multi_penalty_gcv_cuda_optimize_batch(
     result.residual->target_keys = target_keys;
     result.residual->optimizer_status =
       result.optimization.optimizer_status;
+    result.residual->solver_info = result.optimization.solver_info;
+    result.residual->numerical_rank = result.optimization.numerical_rank;
+    result.residual->decomposition_route.resize(
+      static_cast<std::size_t>(target_count));
+    for (int target = 0; target < target_count; ++target) {
+      result.residual->decomposition_route[
+        static_cast<std::size_t>(target)] =
+          prepared->host_states[static_cast<std::size_t>(target)]
+            .current.decomposition_route;
+    }
     result.residual->generation = prepared->generation;
     check_cuda(cudaSetDevice(previous_device),
                "restore device after persistent multi-penalty batch");
@@ -6078,6 +6109,125 @@ multi_penalty_gcv_cuda_evaluate_fixed_batch(
   }
 }
 
+std::shared_ptr<MultiPenaltyGcvCudaResidualBatch>
+multi_penalty_gcv_cuda_finalize_selected_coefficients(
+    const std::shared_ptr<MultiPenaltyGcvCudaPrepared>& prepared,
+    const double* Y,
+    const MultiPenaltyGcvCudaCoefficientConsumerView& coefficients,
+    int n,
+    int target_count,
+    const std::vector<std::string>& target_keys) {
+  if (!prepared || Y == nullptr || coefficients.coefficients == nullptr) {
+    throw std::runtime_error(
+      "persistent multi-penalty coefficient finalization inputs are invalid");
+  }
+  std::lock_guard<std::mutex> lock(prepared->mutex);
+  if (prepared->residual_slot_leased) {
+    throw std::runtime_error("ERR_MULTI_PENALTY_OUTPUT_SLOT_BUSY");
+  }
+  const int q = prepared->q;
+  const std::size_t metadata_count =
+    static_cast<std::size_t>(target_count);
+  if (n != prepared->n || target_count <= 1 ||
+      target_count > prepared->target_capacity ||
+      coefficients.coefficient_dim != q ||
+      coefficients.target_count != target_count ||
+      coefficients.device_id != prepared->device_id ||
+      coefficients.producer_completion_event == nullptr ||
+      coefficients.target_keys != target_keys ||
+      target_keys.size() != metadata_count ||
+      coefficients.solver_info.size() != metadata_count ||
+      coefficients.decomposition_route.size() != metadata_count ||
+      coefficients.numerical_rank.size() != metadata_count ||
+      !std::all_of(coefficients.solver_info.begin(),
+                   coefficients.solver_info.end(),
+                   [](int value) { return value == 0; }) ||
+      !std::all_of(
+        coefficients.decomposition_route.begin(),
+        coefficients.decomposition_route.end(),
+        [](int value) {
+          return value == kMultiPenaltyGcvDecompositionStableSvd;
+        }) ||
+      !std::all_of(coefficients.numerical_rank.begin(),
+                   coefficients.numerical_rank.end(),
+                   [](int value) { return value > 0; })) {
+    throw std::runtime_error(
+      "persistent multi-penalty coefficient finalization identity changed");
+  }
+
+  int previous_device = -1;
+  check_cuda(cudaGetDevice(&previous_device),
+             "query device before coefficient finalization");
+  check_cuda(cudaSetDevice(prepared->device_id),
+             "select device for coefficient finalization");
+  try {
+    const std::size_t y_count =
+      static_cast<std::size_t>(n) * target_count;
+    const std::size_t coefficient_count =
+      static_cast<std::size_t>(q) * target_count;
+    check_cuda(cudaMemcpyAsync(
+      prepared->d_Y.get(), Y, y_count * sizeof(double),
+      cudaMemcpyHostToDevice, prepared->stream.get()),
+      "upload coefficient-finalization targets");
+    check_cuda(cudaStreamWaitEvent(
+      prepared->stream.get(), coefficients.producer_completion_event, 0),
+      "wait for exact-primary coefficient arena");
+    check_cuda(cudaMemcpyAsync(
+      prepared->d_coefficients.get(), coefficients.coefficients,
+      coefficient_count * sizeof(double), cudaMemcpyDeviceToDevice,
+      prepared->stream.get()),
+      "gather exact-primary coefficients for finalization");
+
+    const double alpha = 1.0;
+    const double beta = 0.0;
+    check_cublas(cublasDgemm(
+      prepared->cublas.get(), CUBLAS_OP_N, CUBLAS_OP_N,
+      n, target_count, q, &alpha, prepared->d_X.get(), n,
+      prepared->d_coefficients.get(), q, &beta,
+      prepared->d_fitted.get(), n),
+      "form exact-primary coefficient-finalization fits");
+    const int residual_blocks =
+      (static_cast<int>(y_count) + 255) / 256;
+    form_multi_penalty_residuals_kernel<<<
+      residual_blocks, 256, 0, prepared->stream.get()>>>(
+        prepared->d_Y.get(), prepared->d_fitted.get(),
+        prepared->d_residuals.get(), static_cast<int>(y_count));
+    check_cuda(cudaGetLastError(),
+               "launch exact-primary coefficient-finalization residual");
+    check_cuda(cudaEventRecord(
+      prepared->completion_event.get(), prepared->stream.get()),
+      "record exact-primary coefficient-finalization completion");
+
+    std::shared_ptr<MultiPenaltyGcvCudaResidualBatch> result =
+      std::make_shared<MultiPenaltyGcvCudaResidualBatch>();
+    result->owner = prepared;
+    result->n = n;
+    result->q = q;
+    result->target_count = target_count;
+    result->device_id = prepared->device_id;
+    result->target_keys = target_keys;
+    result->optimizer_status = coefficients.solver_info;
+    result->solver_info = coefficients.solver_info;
+    result->decomposition_route = coefficients.decomposition_route;
+    result->numerical_rank = coefficients.numerical_rank;
+    result->fixed_sp_evaluation = true;
+    prepared->generation += 1;
+    prepared->residual_slot_leased = true;
+    prepared->info.solve_count += 1;
+    prepared->info.cublas_gemm_count += 1;
+    prepared->info.residual_kernel_count += 1;
+    prepared->info.generation = prepared->generation;
+    prepared->info.residual_slot_leased = true;
+    result->generation = prepared->generation;
+    check_cuda(cudaSetDevice(previous_device),
+               "restore device after coefficient finalization");
+    return result;
+  } catch (...) {
+    cudaSetDevice(previous_device);
+    throw;
+  }
+}
+
 MultiPenaltyGcvCudaMultiResult multi_penalty_gcv_cuda_optimize_multi(
     std::vector<MultiPenaltyGcvCudaMultiRequest> requests,
     int requested_concurrency) {
@@ -6229,7 +6379,9 @@ acquire_multi_penalty_gcv_cuda_residual_consumer_view(
   }
   MultiPenaltyGcvCudaResidualConsumerView view;
   view.residuals = residual->owner->d_residuals.get();
+  view.coefficients = residual->owner->d_coefficients.get();
   view.n = residual->n;
+  view.coefficient_dim = residual->q;
   view.target_count = residual->target_count;
   view.device_id = residual->device_id;
   view.producer_stream = residual->owner->stream.get();
@@ -6238,6 +6390,7 @@ acquire_multi_penalty_gcv_cuda_residual_consumer_view(
   view.target_keys = residual->target_keys;
   view.solver_info = residual->solver_info;
   view.decomposition_route = residual->decomposition_route;
+  view.numerical_rank = residual->numerical_rank;
   view.fixed_sp_evaluation = residual->fixed_sp_evaluation;
   return view;
 }

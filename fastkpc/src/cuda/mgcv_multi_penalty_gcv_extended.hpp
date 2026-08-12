@@ -52,6 +52,13 @@ namespace fastkpc {
       const std::shared_ptr<MultiPenaltyGcvCudaPrepared##SUFFIX>&,         \
       const double* Y, const double* log_sp, int n, int target_count,      \
       const std::vector<std::string>& target_keys, double rank_tolerance); \
+  std::shared_ptr<MultiPenaltyGcvCudaResidualBatch##SUFFIX>                \
+  multi_penalty_gcv_cuda_finalize_selected_coefficients_##SUFFIX(         \
+      const std::shared_ptr<MultiPenaltyGcvCudaPrepared##SUFFIX>&,         \
+      const double* Y,                                                     \
+      const MultiPenaltyGcvCudaCoefficientConsumerView& coefficients,     \
+      int n, int target_count,                                             \
+      const std::vector<std::string>& target_keys);                        \
   MultiPenaltyGcvCudaMultiResult##SUFFIX                                  \
   multi_penalty_gcv_cuda_optimize_multi_##SUFFIX(                         \
       std::vector<MultiPenaltyGcvCudaMultiRequest##SUFFIX> requests,       \

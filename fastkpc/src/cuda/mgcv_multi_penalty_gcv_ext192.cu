@@ -20,6 +20,8 @@
   multi_penalty_gcv_cuda_optimize_batch_ext192
 #define multi_penalty_gcv_cuda_evaluate_fixed_batch \
   multi_penalty_gcv_cuda_evaluate_fixed_batch_ext192
+#define multi_penalty_gcv_cuda_finalize_selected_coefficients \
+  multi_penalty_gcv_cuda_finalize_selected_coefficients_ext192
 #define multi_penalty_gcv_cuda_optimize_multi \
   multi_penalty_gcv_cuda_optimize_multi_ext192
 #define multi_penalty_gcv_cuda_residual_info \

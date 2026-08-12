@@ -490,6 +490,17 @@ run_full_cuda_ci_phase35_legacy_eig_batch_from_fixed_evaluator_residual(
   const FullCudaCiLegacyEigBatchRequest& request,
   const std::shared_ptr<FullCudaCiLegacyEigComponentCache>& cache);
 
+// Consumes an exact-primary selected-state residual that has independently
+// qualified as bitwise identical to exact fixed-SP finalization. The separate
+// entry point keeps its physical producer identity auditable while preserving
+// the exact-final residual contract used by the legacy eig consumer.
+FullCudaCiLegacyEigBatchResult
+run_full_cuda_ci_phase35_legacy_eig_batch_from_exact_primary_reuse_residual(
+  const std::shared_ptr<PreparedSGpuHandle>& prepared_s,
+  const MultiPenaltyGcvCudaResidualConsumerView& residual_view,
+  const FullCudaCiLegacyEigBatchRequest& request,
+  const std::shared_ptr<FullCudaCiLegacyEigComponentCache>& cache);
+
 FullCudaCiOptimizerResidualParityDiagnostics
 compare_full_cuda_ci_optimizer_and_fixed_residuals(
   const std::shared_ptr<MultiPenaltyGcvCudaResidualBatch>& optimizer_residual,

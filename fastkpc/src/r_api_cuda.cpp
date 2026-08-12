@@ -8642,6 +8642,8 @@ Rcpp::List multi_penalty_cuda_optimization_to_list(
         diagnostics.cuda_stable_svd_evaluation_count,
       Rcpp::Named("cuda_selected_evaluation_reuse_count") =
         diagnostics.cuda_selected_evaluation_reuse_count,
+      Rcpp::Named("cuda_selected_evaluation_refresh_count") =
+        diagnostics.cuda_selected_evaluation_refresh_count,
       Rcpp::Named("cuda_stability_replay_kernel_launch_count") =
         diagnostics.cuda_stability_replay_kernel_launch_count,
       Rcpp::Named("cuda_stability_merge_kernel_launch_count") =
@@ -9136,6 +9138,8 @@ extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_optimize_cuda(
         diagnostics.cuda_stable_svd_evaluation_count,
       Rcpp::Named("cuda_selected_evaluation_reuse_count") =
         diagnostics.cuda_selected_evaluation_reuse_count,
+      Rcpp::Named("cuda_selected_evaluation_refresh_count") =
+        diagnostics.cuda_selected_evaluation_refresh_count,
       Rcpp::Named("cuda_stability_replay_kernel_launch_count") =
         diagnostics.cuda_stability_replay_kernel_launch_count,
       Rcpp::Named("cuda_stability_merge_kernel_launch_count") =
