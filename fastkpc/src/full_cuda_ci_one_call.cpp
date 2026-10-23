@@ -156,6 +156,13 @@ bool dcc_gamma_legacy_component_cache_residual_bypass_policy() {
   return true;
 }
 
+bool level_component_flag(const char* name) {
+  const char* raw = std::getenv(name);
+  if (!raw || raw[0] == '\0' || std::string(raw) == "0") return false;
+  require(std::string(raw) == "1", std::string(name) + " must be 0 or 1");
+  return true;
+}
+
 bool dcc_gamma_exact_primary_optimizer_policy() {
   const char* raw = std::getenv(
     "FASTKPC_DCC_GAMMA_EXACT_PRIMARY_OPTIMIZER");
@@ -1497,7 +1504,31 @@ class ExactPrimaryCoefficientArena {
   double coefficient_gather_host_ms_ = 0.0;
 };
 
+struct LevelComponentConsumerDiagnostic {
+  std::uint64_t batches = 0, all_hit_batches = 0, mixed_batches = 0, all_miss_batches = 0;
+  std::uint64_t targets = 0, bypassed_targets = 0, residual_targets = 0;
+  double residual_host_ms = 0.0, full_eig_cuda_ms = 0.0, dcov_host_ms = 0.0;
+};
+
 struct OneCallDiagnostics {
+  bool level_component_prefill_enabled = false;
+  bool structured_component_prefill_enabled = false;
+  bool l2_component_prefill_enabled = false;
+  bool prefill_at_level(int level) const {
+    return level_component_prefill_enabled &&
+      (level >= 3 || (level == 2 && l2_component_prefill_enabled));
+  }
+  bool level_component_order_audit = false;
+  std::weak_ptr<FullCudaCiLegacyEigComponentCache> level_component_cache;
+  std::array<std::string, 65> physical_group_sha256{}, gram_sequence_sha256{};
+  std::array<double, 65> level_component_stage_a_host_ms{};
+  std::array<double, 65> level_component_begin_host_ms{}, level_component_finish_host_ms{};
+  std::array<LevelComponentConsumerDiagnostic, 65> level_component_consumers{};
+  double l2_component_input_host_ms = 0.0, l2_component_prepare_host_ms = 0.0;
+  double l2_component_evaluate_host_ms = 0.0, l2_component_release_host_ms = 0.0;
+  std::uint64_t l2_component_prepared_count = 0, l2_component_residual_batches = 0;
+  std::uint64_t l2_component_residual_targets = 0;
+  std::uint64_t level_component_finalization_targets = 0;
   std::unordered_set<std::string> physical_prepared_keys;
   std::unordered_set<std::string> consumed_prepared_keys;
   std::unordered_set<std::string> unique_target_keys;
@@ -4474,6 +4505,7 @@ struct SinglePenaltyPrefillRequest {
   std::vector<int> targets;
   std::vector<std::string> base_target_keys;
   std::vector<std::string> optimizer_state_keys;
+  std::vector<double> prefill_Y;
 };
 
 struct SinglePenaltyPrefillWindowWork {
@@ -4483,6 +4515,7 @@ struct SinglePenaltyPrefillWindowWork {
   std::vector<SinglePenaltyPrefillRequest> requests;
   std::vector<SinglePenaltyGcvCudaOwnedInput> inputs;
   double preparation_ms = 0.0;
+  double component_preparation_ms = 0.0;
 };
 
 SinglePenaltyPrefillWindowWork prepare_single_penalty_prefill_window(
@@ -4568,6 +4601,11 @@ SinglePenaltyPrefillWindowWork prepare_single_penalty_prefill_window(
     input.initial_sp = geometry.initial_sp;
     input.materialize_grid = false;
     input.keep_transcript = false;
+    if (diagnostics->l2_component_prefill_enabled && plan.level == 2) {
+      const auto retain_started = std::chrono::steady_clock::now();
+      request.prefill_Y = input.Y;
+      work.component_preparation_ms += elapsed_ms(retain_started);
+    }
     work.inputs.push_back(std::move(input));
     work.requests.push_back(std::move(request));
   }
@@ -4601,6 +4639,84 @@ SinglePenaltyGcvCudaMultiResult optimize_single_penalty_prefill_window(
       static_cast<int>(inputs.size())));
 }
 
+void prefill_single_penalty_components(
+    const SinglePenaltyPrefillRequest& request,
+    const SinglePenaltyGcvCudaResult& setup,
+    OneCallDiagnostics* diagnostics) {
+  const auto cache = diagnostics->level_component_cache.lock();
+  const auto& context = request.context;
+  const int total = static_cast<int>(request.targets.size());
+  require(cache && diagnostics->prefill_at_level(2) && context &&
+            context->n == 351 && context->coefficient_dim == 30 &&
+            context->penalty_count == 1 && total >= 2 &&
+            setup.targets.size() == request.targets.size() &&
+            request.prefill_Y.size() == static_cast<std::size_t>(total) * context->n &&
+            !context->multi_penalty,
+          "L2 component prefill lost its qualified window identity");
+  const int cohorts = (total + 15) / 16;
+  const int capacity = (total + cohorts - 1) / cohorts;
+  std::shared_ptr<MultiPenaltyGcvCapacityResidualBatch> residual;
+  try {
+    const auto prepare_started = std::chrono::steady_clock::now();
+    ensure_multi_penalty_handle(context, capacity, diagnostics);
+    diagnostics->l2_component_prepare_host_ms += elapsed_ms(prepare_started);
+    ++diagnostics->l2_component_prepared_count;
+    int offset = 0;
+    for (int cohort = 0; cohort < cohorts; ++cohort) {
+      const int count = total / cohorts + (cohort < total % cohorts ? 1 : 0);
+      require(count >= 2 && count <= 16, "L2 component cohort width is unqualified");
+      std::vector<double> log_sp(static_cast<std::size_t>(count));
+      std::vector<std::string> keys;
+      keys.reserve(static_cast<std::size_t>(count));
+      for (int i = 0; i < count; ++i) {
+        // Preserve the optimizer's log-SP bits; log(exp(log-SP)) is not an identity.
+        log_sp[i] = setup.targets[static_cast<std::size_t>(offset + i)].log_sp;
+        require(std::isfinite(log_sp[i]), "L2 component log-SP is non-finite");
+        keys.push_back(exact_fixed_residual_key(
+          request.base_target_keys[static_cast<std::size_t>(offset + i)], &log_sp[i], 1));
+      }
+      const auto evaluate_started = std::chrono::steady_clock::now();
+      residual = multi_penalty_gcv_capacity_evaluate_fixed_batch(
+        context->multi_penalty,
+        request.prefill_Y.data() + static_cast<std::size_t>(offset) * context->n,
+        log_sp.data(), context->n, count, keys,
+        std::sqrt(std::numeric_limits<double>::epsilon()));
+      const double evaluate_ms = elapsed_ms(evaluate_started);
+      const auto view = acquire_multi_penalty_gcv_capacity_residual_consumer_view(residual);
+      require(view.target_keys == keys && view.target_count == count,
+              "L2 component residual target identity changed");
+      // This validates stable-SVD/info/rank and waits for the D2D detach before reuse.
+      store_full_cuda_ci_level_component_residual(cache, view);
+      release_multi_penalty_gcv_capacity_residual(residual);
+      residual.reset();
+      diagnostics->l2_component_evaluate_host_ms += evaluate_ms;
+      ++diagnostics->l2_component_residual_batches;
+      diagnostics->l2_component_residual_targets += count;
+      ++diagnostics->cuda_exact_fixed_evaluator_batch_count;
+      diagnostics->cuda_exact_fixed_evaluator_target_count += count;
+      diagnostics->cuda_exact_fixed_evaluator_stable_svd_target_count += count;
+      diagnostics->cuda_exact_fixed_evaluator_host_ms += evaluate_ms;
+      diagnostics->level_component_finalization_targets += count;
+      diagnostics->physical_residual_fit_count += count;
+      diagnostics->matrix_h2d_bytes += static_cast<std::size_t>(count) *
+        (context->n + 1) * sizeof(double);
+      offset += count;
+    }
+    require(offset == total, "L2 component residual coverage changed");
+    const auto release_started = std::chrono::steady_clock::now();
+    release_multi_penalty_handle(context, diagnostics);
+    diagnostics->l2_component_release_host_ms += elapsed_ms(release_started);
+  } catch (...) {
+    if (residual) {
+      try { release_multi_penalty_gcv_capacity_residual(residual); } catch (...) {}
+    }
+    if (context->multi_penalty) {
+      try { release_multi_penalty_handle(context, diagnostics); } catch (...) {}
+    }
+    throw;
+  }
+}
+
 void complete_single_penalty_prefill_window(
     SinglePenaltyPrefillWindowWork* work,
     SinglePenaltyGcvCudaMultiResult optimization,
@@ -4609,6 +4725,7 @@ void complete_single_penalty_prefill_window(
             !work->requests.empty(),
           "single-penalty prefill completion state is malformed");
   const auto completion_started = std::chrono::steady_clock::now();
+  double component_finalization_ms = 0.0;
   require(optimization.setups.size() == work->requests.size() &&
             optimization.diagnostics.setup_count ==
               static_cast<int>(work->requests.size()) &&
@@ -4658,8 +4775,16 @@ void complete_single_penalty_prefill_window(
       work->batch.optimized_target_keys.push_back(base_key);
       diagnostics->prefill_target_keys.insert(base_key);
     }
+    if (diagnostics->l2_component_prefill_enabled && work->batch.level == 2) {
+      const auto stage_a_started = std::chrono::steady_clock::now();
+      prefill_single_penalty_components(request, setup, diagnostics);
+      component_finalization_ms += elapsed_ms(stage_a_started);
+    }
     optimized_targets += static_cast<int>(request.targets.size());
   }
+  diagnostics->l2_component_input_host_ms += work->component_preparation_ms;
+  diagnostics->level_component_stage_a_host_ms[work->batch.level] +=
+    work->component_preparation_ms + component_finalization_ms;
   diagnostics->cuda_single_penalty_target_count += optimized_targets;
   diagnostics->cuda_single_penalty_optimizer_call_count += 1;
   diagnostics->cuda_optimizer_host_boundary_count += 1;
@@ -4667,7 +4792,7 @@ void complete_single_penalty_prefill_window(
     optimization.diagnostics.wall_host_ms;
   const double logical_boundary_ms =
     work->preparation_ms + optimization.diagnostics.wall_host_ms +
-      elapsed_ms(completion_started);
+      elapsed_ms(completion_started) - work->component_preparation_ms - component_finalization_ms;
   diagnostics->cuda_optimizer_host_ms += logical_boundary_ms;
   work->batch.optimizer_setup_count =
     static_cast<int>(work->requests.size());
@@ -4813,6 +4938,8 @@ struct MultiPenaltyPrefillRequest {
   std::vector<int> targets;
   std::vector<std::string> base_target_keys;
   std::vector<std::string> optimizer_state_keys;
+  std::vector<double> prefill_Y;
+  std::vector<std::string> prefill_residual_keys;
 };
 
 struct MultiPenaltyPrefillWindowWork {
@@ -4909,6 +5036,7 @@ MultiPenaltyPrefillWindowWork prepare_multi_penalty_prefill_window(
         data.begin() + static_cast<std::ptrdiff_t>(target + 1) * context->n,
         input.Y.begin() + static_cast<std::ptrdiff_t>(index) * context->n);
     }
+    if (diagnostics->level_component_prefill_enabled) request.prefill_Y = input.Y;
     work.metadata.push_back(std::move(request));
     work.requests.push_back(std::move(input));
   }
@@ -5005,6 +5133,7 @@ void complete_multi_penalty_prefill_window(
             !work->metadata.empty(),
           "multi-penalty prefill completion state is malformed");
   const auto completion_started = std::chrono::steady_clock::now();
+  double level_component_finalization_ms = 0.0;
   try {
     require(optimization.setups.size() == work->metadata.size() &&
               optimization.diagnostics.setup_count ==
@@ -5110,6 +5239,9 @@ void complete_multi_penalty_prefill_window(
         coefficient_arena->enqueue_store(
           work->batch.level, request.base_target_keys, exact_residual_keys,
           optimization.residuals[setup_index]);
+        if (diagnostics->level_component_prefill_enabled) {
+          work->metadata[setup_index].prefill_residual_keys = exact_residual_keys;
+        }
       }
       diagnostics->cuda_multi_penalty_target_count += target_count;
       if (coefficient_arena == nullptr || !coefficient_arena->enabled()) {
@@ -5120,6 +5252,52 @@ void complete_multi_penalty_prefill_window(
       coefficient_arena->finish_store_window();
       release_multi_penalty_prefill_window_residuals(
         &optimization.residuals);
+      if (diagnostics->level_component_prefill_enabled) {
+        const auto stage_a_started = std::chrono::steady_clock::now();
+        const auto cache = diagnostics->level_component_cache.lock();
+        require(cache != nullptr, "level component prefill cache expired");
+        for (const auto& request : work->metadata) {
+          const int total = static_cast<int>(request.targets.size());
+          const int cohorts = (total + 15) / 16;
+          int offset = 0;
+          require(request.context->multi_penalty &&
+                    request.prefill_residual_keys.size() == request.targets.size() &&
+                    request.prefill_Y.size() == request.targets.size() * request.context->n,
+                  "level prefill lost its window inputs or prepared handle");
+          for (int cohort = 0; cohort < cohorts; ++cohort) {
+            const int count = total / cohorts + (cohort < total % cohorts ? 1 : 0);
+            const std::vector<std::string> keys(
+              request.prefill_residual_keys.begin() + offset,
+              request.prefill_residual_keys.begin() + offset + count);
+            const auto coefficients = coefficient_arena->gather_coefficients(
+              work->batch.level, request.context->coefficient_dim, keys);
+            std::shared_ptr<MultiPenaltyGcvCapacityResidualBatch> residual;
+            try {
+              residual = multi_penalty_gcv_capacity_finalize_selected_coefficients(
+                request.context->multi_penalty,
+                request.prefill_Y.data() + static_cast<std::size_t>(offset) * request.context->n,
+                coefficients, request.context->n, count, keys);
+              store_full_cuda_ci_level_component_residual(cache,
+                acquire_multi_penalty_gcv_capacity_residual_consumer_view(residual));
+              // store waits for the detach: both the source slot and the arena
+              // coefficient staging can now be reused by the next cohort.
+              release_multi_penalty_gcv_capacity_residual(residual);
+            } catch (...) {
+              coefficient_arena->synchronize_noexcept();
+              if (residual) release_multi_penalty_gcv_capacity_residual(residual);
+              throw;
+            }
+            diagnostics->level_component_finalization_targets += count;
+            diagnostics->physical_residual_fit_count += count;
+            diagnostics->matrix_h2d_bytes +=
+              static_cast<std::size_t>(count) * request.context->n * sizeof(double);
+            offset += count;
+          }
+        }
+        level_component_finalization_ms = elapsed_ms(stage_a_started);
+        diagnostics->level_component_stage_a_host_ms[work->batch.level] +=
+          level_component_finalization_ms;
+      }
       release_multi_penalty_prefill_window_handles(
         work->metadata, diagnostics);
     }
@@ -5133,7 +5311,7 @@ void complete_multi_penalty_prefill_window(
   }
   const double logical_boundary_ms =
     work->preparation_ms + optimization.diagnostics.wall_host_ms +
-      elapsed_ms(completion_started);
+      elapsed_ms(completion_started) - level_component_finalization_ms;
   diagnostics->cuda_multi_penalty_optimizer_call_count += 1;
   diagnostics->cuda_optimizer_host_boundary_count += 1;
   diagnostics->cuda_multi_penalty_optimizer_host_ms +=
@@ -6069,6 +6247,7 @@ GroupResult execute_group(
   }
 
   FullCudaCiLegacyEigBatchRequest legacy_request;
+  legacy_request.audit_component_order = diagnostics->level_component_order_audit;
   legacy_request.expected_prepared_s_key_sha256 = context->prepared_key;
   legacy_request.component_capacity = target_count;
   legacy_request.num_col = num_col;
@@ -6099,6 +6278,10 @@ GroupResult execute_group(
   }
 
   FullCudaCiLegacyEigBatchResult legacy;
+  if (diagnostics->prefill_at_level(plan.level)) {
+    require(component_cache_all_hit,
+            "level component prefill unexpected consumer miss failed closed");
+  }
   if (direct || component_cache_all_hit) {
     legacy = legacy_component_cache ?
       run_full_cuda_ci_phase35_legacy_eig_batch_with_component_cache(
@@ -6362,7 +6545,36 @@ GroupResult execute_group(
       }
     }
   }
+  if (diagnostics->level_component_order_audit) {
+    std::ostringstream identity;
+    identity << "level=" << plan.level << "\nrequest="
+             << legacy_request.request_identity_sha256 << "\ncount="
+             << legacy.diagnostics.gram_component_keys.size() << '\n';
+    for (const auto& key : legacy.diagnostics.gram_component_keys) identity << key << '\n';
+    auto& digest = diagnostics->gram_sequence_sha256[plan.level];
+    digest = full_cuda_ci_sha256_utf8(digest + identity.str());
+  }
   accumulate_legacy_compatible_diagnostics(legacy.diagnostics, diagnostics);
+  auto& consumer = diagnostics->level_component_consumers[plan.level];
+  ++consumer.batches;
+  consumer.targets += target_count;
+  const int cache_hits = legacy.diagnostics.component_cache_persistent_hit_count;
+  const int cache_misses = legacy.diagnostics.component_cache_persistent_miss_count;
+  if (cache_hits == target_count) ++consumer.all_hit_batches;
+  else if (cache_misses == target_count) ++consumer.all_miss_batches;
+  else ++consumer.mixed_batches;
+  const int bypassed = legacy.diagnostics.residual_solve_bypassed_by_component_cache ?
+    target_count : 0;
+  consumer.bypassed_targets += bypassed;
+  consumer.residual_targets += target_count - bypassed;
+  consumer.residual_host_ms += legacy.diagnostics.residual_solve_host_ms;
+  consumer.full_eig_cuda_ms += legacy.diagnostics.full_eig_cuda_ms;
+  consumer.dcov_host_ms += legacy.diagnostics.dcov_host_boundary_ms;
+  require(!diagnostics->prefill_at_level(plan.level) ||
+            (cache_hits == target_count && cache_misses == 0 && bypassed == target_count &&
+             legacy.diagnostics.residual_solve_host_ms == 0.0 &&
+             legacy.diagnostics.full_eig_cuda_ms == 0.0),
+          "level component prefill consumer unexpectedly recomputed numerics");
   if (context->penalty_count == 1) {
     diagnostics->cuda_single_penalty_residual_solve_host_ms +=
       legacy.diagnostics.residual_solve_host_ms;
@@ -6451,6 +6663,28 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
   FixedSpRuntimePool runtime_pool(n);
 
   OneCallDiagnostics diagnostics;
+  diagnostics.level_component_prefill_enabled = level_component_flag(
+    "FASTKPC_DCC_GAMMA_LEVEL_COMPONENT_PREFILL");
+  diagnostics.structured_component_prefill_enabled = level_component_flag(
+    "FASTKPC_DCC_GAMMA_STRUCTURED_COMPONENT_PREFILL");
+  diagnostics.l2_component_prefill_enabled = level_component_flag(
+    "FASTKPC_DCC_GAMMA_L2_COMPONENT_PREFILL");
+  require(!diagnostics.l2_component_prefill_enabled ||
+            (diagnostics.level_component_prefill_enabled &&
+             diagnostics.structured_component_prefill_enabled &&
+             method_options.ci_method == "dcc.gamma" && n == 351 && p == 48 && num_col == 35),
+          "L2 component prefill requires structured level prefill and dcc.gamma 351x48 numCol=35");
+  require(!diagnostics.structured_component_prefill_enabled ||
+            (diagnostics.level_component_prefill_enabled &&
+             method_options.ci_method == "dcc.gamma" && n == 351 &&
+             (p == 22 || p == 48) && num_col == 35),
+          "structured component prefill requires level prefill and dcc.gamma 351x22 or 351x48 numCol=35");
+  diagnostics.level_component_order_audit = diagnostics.level_component_prefill_enabled ||
+    level_component_flag("FASTKPC_DIAG_LEVEL_COMPONENT_ORDER");
+  require(!diagnostics.level_component_prefill_enabled ||
+            (method_options.ci_method == "dcc.gamma" && n == 351 &&
+             (p == 22 || p == 48)),
+          "level component prefill prototype is restricted to dcc.gamma 351x22 or 351x48");
   diagnostics.dcc_gamma_exact_primary_optimizer_requested =
     method_options.ci_method == "dcc.gamma" &&
       dcc_gamma_exact_primary_optimizer_policy();
@@ -6526,6 +6760,10 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
   const bool fresh_dataset_semantic_caches =
     result_cache_start.dataset_entries == 0U &&
     target_cache_start.dataset_entries == 0U;
+  require(!diagnostics.level_component_prefill_enabled ||
+            (fresh_dataset_semantic_caches && diagnostics.exact_primary_fixed_reuse_requested &&
+             !diagnostics.exact_primary_coefficient_parity_diagnostic_enabled),
+          "level component prefill requires fresh caches and exact-primary reuse");
   diagnostics.dataset_cache_epoch_at_start =
     dataset_cache_epoch().load(std::memory_order_acquire);
   NativeSetupCache setup_cache(
@@ -6595,6 +6833,17 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
         cache_info.execution_context_device_bytes;
     }
   }
+  if (diagnostics.level_component_prefill_enabled) {
+    require(legacy_component_cache &&
+              diagnostics.legacy_component_cache_residual_bypass_requested &&
+              diagnostics.legacy_component_eig_lane_count == 8 &&
+              diagnostics.legacy_component_wave_capacity_requested == 1 &&
+              !diagnostics.legacy_component_wave_positive_miss_only_requested,
+            "level component prefill requires cache/bypass/8 lanes and original scheduler");
+    diagnostics.level_component_cache = legacy_component_cache;
+    configure_full_cuda_ci_structured_prefill(legacy_component_cache,
+      diagnostics.structured_component_prefill_enabled);
+  }
   LegacyRPermutationWorkspace permutation_workspace;
   permutation_workspace.inline_r_index_requested =
     strict_hsic_perm_inline_r_index_policy_enabled(
@@ -6658,6 +6907,9 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
       const auto level_started = std::chrono::steady_clock::now();
       const LayerPlan plan = make_layer_plan(adjacency, p, level);
       const int task_count = static_cast<int>(plan.tasks.size());
+      // A preceding deletion can leave the next planned layer empty. Skip all
+      // three prefill lifecycle operations together, preserving ordinary replay.
+      const bool prefill_this_level = diagnostics.prefill_at_level(level) && task_count > 0;
       std::vector<unsigned char> delete_edges(
         static_cast<std::size_t>(p) * p, 0U);
       std::vector<unsigned char> consumed(
@@ -6679,6 +6931,19 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
       if (exact_primary_coefficient_arena.enabled() && level >= 3) {
         exact_primary_coefficient_arena.begin_level(level);
       }
+      if (prefill_this_level) {
+        std::map<std::string, std::set<int>> planned_targets;
+        for (const auto& task : plan.tasks) {
+          auto& targets = planned_targets[conditioning_key(task.conditioning_set)];
+          targets.insert(task.orientation_x);
+          targets.insert(task.orientation_y);
+        }
+        std::size_t planned = 0;
+        for (const auto& group : planned_targets) planned += group.second.size();
+        const auto begin_started = std::chrono::steady_clock::now();
+        begin_full_cuda_ci_level_component_prefill(legacy_component_cache, level, planned);
+        diagnostics.level_component_begin_host_ms[level] += elapsed_ms(begin_started);
+      }
 
       std::vector<std::vector<int>> edge_tasks(
         static_cast<std::size_t>(p) * p);
@@ -6695,6 +6960,9 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
         prefill_multi_penalty_level_target_states(
           data, plan, &setup_cache, &exact_primary_coefficient_arena,
           &diagnostics);
+      }
+      if (prefill_this_level) {
+        build_full_cuda_ci_level_components(legacy_component_cache);
       }
       std::vector<std::size_t> edge_positions(
         static_cast<std::size_t>(p) * p, 0U);
@@ -6959,6 +7227,19 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
 
         int wave_group_position = 0;
         for (FrontierWork& work : wave) {
+          if (diagnostics.level_component_order_audit) {
+            std::ostringstream identity;
+            identity << "level=" << level << "\nS=";
+            require(!work.selected.empty(), "physical group audit has no selected task");
+            identity << conditioning_key(plan.tasks[work.selected.front()].conditioning_set)
+                     << "\nselected=";
+            for (int task : work.selected) identity << task << ',';
+            identity << "\nexecuted=";
+            for (int task : work.group_tasks) identity << task << ',';
+            identity << '\n';
+            auto& digest = diagnostics.physical_group_sha256[level];
+            digest = full_cuda_ci_sha256_utf8(digest + identity.str());
+          }
           const std::uint64_t component_requests_before =
             diagnostics.legacy_component_cache_request_count;
           const std::uint64_t component_hits_before =
@@ -7174,6 +7455,11 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
       if (exact_primary_coefficient_arena.enabled() && level >= 3) {
         exact_primary_coefficient_arena.finish_level(level);
       }
+      if (prefill_this_level) {
+        const auto finish_started = std::chrono::steady_clock::now();
+        finish_full_cuda_ci_level_component_prefill(legacy_component_cache);
+        diagnostics.level_component_finish_host_ms[level] += elapsed_ms(finish_started);
+      }
       if (pcalg_done) break;
     }
   } catch (...) {
@@ -7289,6 +7575,96 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
       diagnostics.legacy_component_cache_entries =
       legacy_component_cache_info.entries;
   }
+  std::uint64_t prefill_produced = 0, prefill_resolved = 0;
+  Rcpp::List level_component_rows(legacy_component_cache_info.level_prefill.size());
+  for (std::size_t i = 0; i < legacy_component_cache_info.level_prefill.size(); ++i) {
+    const auto& row = legacy_component_cache_info.level_prefill[i];
+    require(row.finished && row.planned == row.produced && row.planned == row.residual_targets &&
+              row.resolved + row.pending_at_end == row.planned &&
+              row.residual_d2d_bytes == row.planned * n * sizeof(double) &&
+              row.three_field_store_bytes == row.produced * (n * num_col + num_col + 1) * sizeof(double) &&
+              row.gather_d2d_bytes == row.resolved * (n * num_col + num_col) * sizeof(double) &&
+              row.self_moment_store_bytes == row.resolved * sizeof(double),
+            "level component prefill split ledger failed closed");
+    prefill_produced += row.produced;
+    prefill_resolved += row.resolved;
+    level_component_rows[i] = Rcpp::List::create(
+      Rcpp::Named("level") = row.level,
+      Rcpp::Named("planned") = static_cast<double>(row.planned),
+      Rcpp::Named("residual_targets") = static_cast<double>(row.residual_targets),
+      Rcpp::Named("residual_batches") = static_cast<double>(row.residual_batches),
+      Rcpp::Named("produced") = static_cast<double>(row.produced),
+      Rcpp::Named("prefill_batches") = static_cast<double>(row.prefill_batches),
+      Rcpp::Named("resolved") = static_cast<double>(row.resolved),
+      Rcpp::Named("resolve_batches") = static_cast<double>(row.resolve_batches),
+      Rcpp::Named("consumer_requests") = static_cast<double>(row.requests),
+      Rcpp::Named("pending_at_end") = static_cast<double>(row.pending_at_end),
+      Rcpp::Named("residual_d2d_bytes") = static_cast<double>(row.residual_d2d_bytes),
+      Rcpp::Named("three_field_store_bytes") = static_cast<double>(row.three_field_store_bytes),
+      Rcpp::Named("gather_d2d_bytes") = static_cast<double>(row.gather_d2d_bytes),
+      Rcpp::Named("self_moment_store_bytes") = static_cast<double>(row.self_moment_store_bytes),
+      Rcpp::Named("residual_peak_bytes") = static_cast<double>(row.residual_peak_bytes),
+      Rcpp::Named("stage_a_host_ms") = diagnostics.level_component_stage_a_host_ms[row.level],
+      Rcpp::Named("begin_host_ms") = diagnostics.level_component_begin_host_ms[row.level],
+      Rcpp::Named("finish_host_ms") = diagnostics.level_component_finish_host_ms[row.level],
+      Rcpp::Named("residual_copy_host_ms") = row.residual_copy_host_ms,
+      Rcpp::Named("stage_b_host_ms") = row.prefill_host_ms,
+      Rcpp::Named("distance_cuda_ms") = row.distance_cuda_ms,
+      Rcpp::Named("eig_cuda_ms") = row.eig_cuda_ms,
+      Rcpp::Named("selection_store_cuda_ms") = row.selection_store_cuda_ms,
+      Rcpp::Named("gather_cuda_ms") = row.gather_cuda_ms,
+      Rcpp::Named("gram_cuda_ms") = row.gram_cuda_ms);
+    Rcpp::List component_row = level_component_rows[i];
+    component_row["structured"] = Rcpp::List::create(
+      Rcpp::Named("accepted") = static_cast<double>(row.structured_accepted),
+      Rcpp::Named("dense_fallback") = static_cast<double>(row.dense_fallback),
+      Rcpp::Named("fallback_info") = static_cast<double>(row.fallback_info),
+      Rcpp::Named("fallback_rotation") = static_cast<double>(row.fallback_rotation),
+      Rcpp::Named("fallback_gap") = static_cast<double>(row.fallback_gap),
+      Rcpp::Named("fallback_batches") = static_cast<double>(row.dense_fallback_batches),
+      Rcpp::Named("gap_below_1e4_count") = static_cast<double>(row.small_gap_count),
+      Rcpp::Named("minimum_gap") = row.structured_minimum_gap,
+      Rcpp::Named("rotations_max") = row.rotations_max,
+      Rcpp::Named("contexts") = row.structured_contexts,
+      Rcpp::Named("width") = row.structured_width,
+      Rcpp::Named("peak_inflight") = row.structured_peak_inflight,
+      Rcpp::Named("waves") = static_cast<double>(row.structured_waves),
+      Rcpp::Named("solver_workspace_bytes") = static_cast<double>(row.structured_solver_bytes),
+      Rcpp::Named("pool_device_bytes") = static_cast<double>(row.structured_pool_bytes),
+      Rcpp::Named("sampled_device_used_bytes") = static_cast<double>(row.sampled_device_used_bytes),
+      Rcpp::Named("create_host_ms") = row.structured_create_host_ms,
+      Rcpp::Named("lane_eig_cuda_ms_sum") = row.structured_lane_cuda_ms_sum);
+    level_component_rows[i] = component_row;
+    require(!diagnostics.structured_component_prefill_enabled ||
+              (row.structured_accepted + row.dense_fallback == row.produced &&
+               row.dense_fallback == row.fallback_info + row.fallback_rotation + row.fallback_gap &&
+               row.structured_contexts >= 1 && row.structured_contexts <= 10 &&
+               row.structured_width == 64 && row.structured_peak_inflight <= 640),
+            "structured component split ledger failed closed");
+  }
+  require(prefill_produced == diagnostics.level_component_finalization_targets &&
+            (diagnostics.level_component_prefill_enabled || prefill_produced == 0),
+          "level component prefill finalizer coverage changed");
+  Rcpp::List level_consumer_rows;
+  for (int level = 0; level < 65; ++level) {
+    const auto& row = diagnostics.level_component_consumers[level];
+    if (row.batches == 0) continue;
+    require(row.batches == row.all_hit_batches + row.mixed_batches + row.all_miss_batches &&
+              row.targets == row.bypassed_targets + row.residual_targets,
+            "level component consumer ledger failed closed");
+    level_consumer_rows.push_back(Rcpp::List::create(
+      Rcpp::Named("level") = level,
+      Rcpp::Named("batches") = static_cast<double>(row.batches),
+      Rcpp::Named("all_hit_batches") = static_cast<double>(row.all_hit_batches),
+      Rcpp::Named("mixed_batches") = static_cast<double>(row.mixed_batches),
+      Rcpp::Named("all_miss_batches") = static_cast<double>(row.all_miss_batches),
+      Rcpp::Named("targets") = static_cast<double>(row.targets),
+      Rcpp::Named("bypassed_targets") = static_cast<double>(row.bypassed_targets),
+      Rcpp::Named("residual_targets") = static_cast<double>(row.residual_targets),
+      Rcpp::Named("residual_host_ms") = row.residual_host_ms,
+      Rcpp::Named("full_eig_cuda_ms") = row.full_eig_cuda_ms,
+      Rcpp::Named("dcov_host_ms") = row.dcov_host_ms));
+  }
   const std::uint64_t legacy_component_eig_histogram_batch_count =
     std::accumulate(
       diagnostics.legacy_component_eig_batch_count_by_miss.begin(),
@@ -7330,7 +7706,7 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
       diagnostics.legacy_component_cache_miss_count ==
         legacy_component_cache_info.miss_count &&
       diagnostics.legacy_component_cache_insert_count ==
-        legacy_component_cache_info.insert_count &&
+        legacy_component_cache_info.insert_count - prefill_produced &&
       diagnostics.legacy_component_cache_bypass_count ==
         legacy_component_cache_info.bypass_count &&
       diagnostics.legacy_component_cache_route_mismatch_count == 0U &&
@@ -7342,7 +7718,9 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
         diagnostics.legacy_component_cache_insert_count +
           diagnostics.legacy_component_cache_bypass_count &&
       diagnostics.legacy_component_cache_entries ==
-        diagnostics.legacy_component_cache_insert_count &&
+        legacy_component_cache_info.insert_count -
+          legacy_component_cache_info.discarded_complete -
+          legacy_component_cache_info.discarded_pending &&
       diagnostics.legacy_component_cache_store_d2d_bytes ==
         diagnostics.legacy_component_cache_insert_count *
           legacy_component_cache_info.bytes_per_entry &&
@@ -7824,13 +8202,22 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
       diagnostics.cuda_exact_fixed_evaluator_target_count,
     "compatible.cuda exact fixed evaluator route accounting changed");
   if (diagnostics.exact_primary_fixed_reuse_requested) {
+    // L2 evaluates fixed-SP independently; only deeper prefill gathers the
+    // exact-primary coefficient arena. Keep both ledgers explicit.
+    require(diagnostics.l2_component_residual_targets <=
+              diagnostics.level_component_finalization_targets,
+            "L2 fixed evaluator target accounting changed");
+    const std::uint64_t coefficient_prefill_targets =
+      diagnostics.level_component_finalization_targets -
+        diagnostics.l2_component_residual_targets;
     require(
       diagnostics.exact_primary_fixed_reuse_store_target_count ==
         diagnostics.cuda_multi_penalty_exact_primary_target_count &&
         diagnostics
             .exact_primary_fixed_reuse_coefficient_gather_copy_count ==
           static_cast<std::uint64_t>(
-            diagnostics.exact_primary_fixed_reuse_hit_target_count) &&
+            diagnostics.exact_primary_fixed_reuse_hit_target_count) +
+              coefficient_prefill_targets &&
         ((diagnostics.exact_primary_fixed_reuse_store_target_count == 0U &&
           diagnostics
               .exact_primary_fixed_reuse_coefficient_store_d2d_bytes == 0U) ||
@@ -7838,9 +8225,11 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
           diagnostics
               .exact_primary_fixed_reuse_coefficient_store_d2d_bytes > 0U)) &&
         ((diagnostics.exact_primary_fixed_reuse_hit_target_count == 0 &&
+          coefficient_prefill_targets == 0 &&
           diagnostics
               .exact_primary_fixed_reuse_coefficient_gather_d2d_bytes == 0U) ||
-         (diagnostics.exact_primary_fixed_reuse_hit_target_count > 0 &&
+         ((diagnostics.exact_primary_fixed_reuse_hit_target_count > 0 ||
+           coefficient_prefill_targets > 0) &&
           diagnostics
               .exact_primary_fixed_reuse_coefficient_gather_d2d_bytes > 0U)) &&
         diagnostics.exact_primary_fixed_reuse_allocation_count ==
@@ -7985,6 +8374,28 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
     Rcpp::Named("exact_primary_fixed_reuse_key_trace") =
       exact_primary_fixed_reuse_key_trace,
     Rcpp::Named("summary") = Rcpp::List::create(
+      Rcpp::Named("level_component_prefill_enabled") = diagnostics.level_component_prefill_enabled,
+      Rcpp::Named("structured_component_prefill_enabled") = diagnostics.structured_component_prefill_enabled,
+      Rcpp::Named("l2_component_prefill_enabled") = diagnostics.l2_component_prefill_enabled,
+      Rcpp::Named("level_component_consumers") = level_consumer_rows,
+      Rcpp::Named("l2_component_input_host_ms") = diagnostics.l2_component_input_host_ms,
+      Rcpp::Named("l2_component_prepare_host_ms") = diagnostics.l2_component_prepare_host_ms,
+      Rcpp::Named("l2_component_evaluate_host_ms") = diagnostics.l2_component_evaluate_host_ms,
+      Rcpp::Named("l2_component_release_host_ms") = diagnostics.l2_component_release_host_ms,
+      Rcpp::Named("l2_component_prepared_count") = static_cast<double>(diagnostics.l2_component_prepared_count),
+      Rcpp::Named("l2_component_residual_batches") = static_cast<double>(diagnostics.l2_component_residual_batches),
+      Rcpp::Named("l2_component_residual_targets") = static_cast<double>(diagnostics.l2_component_residual_targets),
+      Rcpp::Named("level_component_order_audit") = diagnostics.level_component_order_audit,
+      Rcpp::Named("level_component_prefill") = level_component_rows,
+      Rcpp::Named("level_component_produced") = static_cast<double>(prefill_produced),
+      Rcpp::Named("level_component_resolved") = static_cast<double>(prefill_resolved),
+      Rcpp::Named("level_component_cache_reset_count") = static_cast<double>(legacy_component_cache_info.reset_count),
+      Rcpp::Named("level_component_discarded_complete") = static_cast<double>(legacy_component_cache_info.discarded_complete),
+      Rcpp::Named("level_component_discarded_pending") = static_cast<double>(legacy_component_cache_info.discarded_pending),
+      Rcpp::Named("physical_group_sequence_sha256") = Rcpp::wrap(std::vector<std::string>(
+        diagnostics.physical_group_sha256.begin(), diagnostics.physical_group_sha256.end())),
+      Rcpp::Named("gram_resolution_sequence_sha256") = Rcpp::wrap(std::vector<std::string>(
+        diagnostics.gram_sequence_sha256.begin(), diagnostics.gram_sequence_sha256.end())),
       Rcpp::Named("run_status") = "ok",
       Rcpp::Named("entrypoint") =
         "compatible-cuda-full-skeleton-native-v1",

@@ -28,6 +28,14 @@ COMMON_CXX="$CXXSTD $CXXFLAGS -fPIC $COMMON_INC"
 flock 9
 trap 'rm -f "$TMP_SO"' EXIT INT TERM
 
+# Dedicated numerical contract: never compile structured kernels into the
+# consumer TU or inherit its FMA policy. Regenerate from the vendored LAPACK.
+python3 -I "$ROOT/tools/generate_recorded_dbdsqr.py" "$BUILD/recorded_dbdsqr.inc"
+"$NVCC" -O3 -arch=sm_89 --fmad=false -DFASTKPC_STRUCTURED_FMAD_DISABLED=1 \
+  -diag-suppress 2464 -Xcompiler -fPIC -std=c++17 -I"$BUILD" \
+  $COMMON_INC -c "$ROOT/src/cuda/full_cuda_ci_structured_eig.cu" \
+  -o "$BUILD/full_cuda_ci_structured_eig.o"
+
 if [ "${FASTKPC_INCREMENTAL_ONE_CALL_ONLY:-0}" = "1" ]; then
 "$CXX" $COMMON_CXX -c "$ROOT/src/full_cuda_ci_one_call.cpp" \
   -o "$BUILD/full_cuda_ci_one_call.o"
@@ -276,6 +284,7 @@ fi
   "$BUILD/r_api_cuda.o" \
   "$BUILD/dcov_batch_cuda.o" \
   "$BUILD/full_cuda_ci_vertical.o" \
+  "$BUILD/full_cuda_ci_structured_eig.o" \
   "$BUILD/full_cuda_ci_method_batch.o" \
   "$BUILD/legacy_dcov_spectra_matvec_cuda.o" \
   "$BUILD/hsic_batch_cuda.o" \

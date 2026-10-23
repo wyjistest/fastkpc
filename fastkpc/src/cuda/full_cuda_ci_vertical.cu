@@ -1,4 +1,5 @@
 #include "full_cuda_ci_vertical.hpp"
+#include "full_cuda_ci_structured_eig.hpp"
 #include "mgcv_multi_penalty_gcv.hpp"
 
 #include "../full_cuda_ci_contract.hpp"
@@ -15,6 +16,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <numeric>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
@@ -51,6 +53,27 @@ void check_cuda(cudaError_t status, const char* stage) {
       std::string(stage) + ": " + cudaGetErrorString(status));
   }
 }
+
+// Prefill helpers can be called with a different current device. Do not make
+// later helpers depend on a device change leaking out of begin_level().
+class ScopedPrefillDevice {
+ public:
+  explicit ScopedPrefillDevice(int device) {
+    check_cuda(cudaGetDevice(&caller_device_), "get prefill caller device");
+    if (caller_device_ != device) {
+      check_cuda(cudaSetDevice(device), "select prefill device");
+      changed_ = true;
+    }
+  }
+  ~ScopedPrefillDevice() {
+    if (changed_) (void)cudaSetDevice(caller_device_);
+  }
+  ScopedPrefillDevice(const ScopedPrefillDevice&) = delete;
+  ScopedPrefillDevice& operator=(const ScopedPrefillDevice&) = delete;
+ private:
+  int caller_device_ = -1;
+  bool changed_ = false;
+};
 
 void check_cublas(cublasStatus_t status, const char* stage) {
   if (status != CUBLAS_STATUS_SUCCESS) {
@@ -1640,6 +1663,159 @@ class FullCudaCiLegacyEigExecutionContext {
   std::unique_ptr<TrackedDeviceBuffer> device_result_buffer_;
 };
 
+// Shared numerical statements for ordinary misses and the opt-in prefill.
+int submit_legacy_three_fields(FullCudaCiLegacyEigExecutionContext* context,
+                              const double* residuals, int n, int k, int count) {
+  const auto stream = context->stream();
+  check_cuda(cudaEventRecord(context->distance_start(), stream),
+             "record legacy eig distance start");
+  build_distance_rows_batch_kernel<<<dim3(n, count, 1), kVerticalBlockSize,
+    0, stream>>>(residuals,
+      static_cast<const int*>(context->component_targets()), n, count,
+      static_cast<std::size_t>(n) * n, context->component_matrices(),
+      context->row_sums());
+  check_cuda(cudaGetLastError(), "launch legacy eig distance rows");
+  reduce_rows_batch_kernel<<<count, kVerticalBlockSize, 0, stream>>>(
+    context->row_sums(), n, count, context->totals());
+  check_cuda(cudaGetLastError(), "launch legacy eig distance totals");
+  check_cuda(cudaEventRecord(context->distance_end(), stream),
+             "record legacy eig distance end");
+  const int lanes = context->submit_eigensolves(count);
+  select_center_legacy_eigencomponent_kernel<<<count, kVerticalBlockSize,
+    static_cast<std::size_t>(n) * sizeof(unsigned char), stream>>>(
+      context->eigenvalues(), context->component_matrices(), n, k, count,
+      context->selected_values(), context->vectors());
+  check_cuda(cudaGetLastError(), "launch legacy eig component selection");
+  return lanes;
+}
+
+void submit_legacy_gram(FullCudaCiLegacyEigExecutionContext* context,
+                        int n, int k, int count) {
+  const double one = 1.0, zero = 0.0;
+  check_cublas(cublasDgemmStridedBatched(
+    context->blas(), CUBLAS_OP_T, CUBLAS_OP_N, k, k, n, &one,
+    context->vectors(), n, static_cast<long long>(n) * k,
+    context->vectors(), n, static_cast<long long>(n) * k,
+    &zero, context->component_grams(), k, static_cast<long long>(k) * k,
+    count), "form legacy eig component Gram matrices");
+  reduce_legacy_self_moment_kernel<<<count, kVerticalBlockSize, 0,
+    context->stream()>>>(context->component_grams(), context->selected_values(),
+      count, k, context->self_moments());
+  check_cuda(cudaGetLastError(), "launch legacy eig self moments");
+}
+
+
+__global__ void center_structured_component_kernel(const double* raw,
+    const StructuredComponentStatus* status, int n, int num_col, int count,
+    double* centered_vectors) {
+  const int component = blockIdx.x;
+  if (component >= count || status[component].reason) return;
+  __shared__ int selected_indices[64];
+  __shared__ double reduction[kVerticalBlockSize];
+  for (int j=threadIdx.x; j<num_col; j+=blockDim.x) selected_indices[j]=j;
+  __syncthreads();
+  const double* eigenvectors = raw + size_t(component)*n*(num_col+1);
+  double* output = centered_vectors +
+    static_cast<std::size_t>(component) *
+      static_cast<std::size_t>(n) * num_col;
+  for (int selected = 0; selected < num_col; ++selected) {
+    const int source_column = selected_indices[selected];
+    const double* source = eigenvectors +
+      static_cast<std::size_t>(source_column) * n;
+    double sum = 0.0;
+    for (int row = static_cast<int>(threadIdx.x);
+         row < n; row += static_cast<int>(blockDim.x)) {
+      sum += source[row];
+    }
+    reduction[threadIdx.x] = sum;
+    __syncthreads();
+    for (int stride = kVerticalBlockSize / 2; stride > 0; stride >>= 1) {
+      if (static_cast<int>(threadIdx.x) < stride) {
+        reduction[threadIdx.x] += reduction[threadIdx.x + stride];
+      }
+      __syncthreads();
+    }
+    const double mean = reduction[0] / static_cast<double>(n);
+    for (int row = static_cast<int>(threadIdx.x);
+         row < n; row += static_cast<int>(blockDim.x)) {
+      output[static_cast<std::size_t>(selected) * n + row] =
+        source[row] - mean;
+    }
+    __syncthreads();
+  }
+}
+
+struct StructuredPlanDeleter {
+  void operator()(StructuredComponentPlan* p) const noexcept { destroy_structured_component_plan(p); }
+};
+
+// Thin producer: no cache, BLAS/solver handles or pair consumer per lane.
+// All CUDA resources use the same ledger as the retained runtime.
+class StructuredComponentLane {
+ public:
+  StructuredComponentLane(int n, int k, int capacity, VerticalCallAccounting* accounting,
+                          int rotation_capacity=170662)
+      : n(n), k(k), capacity(capacity), accounting(accounting), statuses(capacity),
+        host_targets(capacity) {
+    stream=std::make_unique<TrackedCudaStream>();
+    distance_start=std::make_unique<TrackedCudaEvent>(true);
+    eig_start=std::make_unique<TrackedCudaEvent>(true);
+    eig_end=std::make_unique<TrackedCudaEvent>(true);
+    completion=std::make_unique<TrackedCudaEvent>(true);
+    plan.reset(create_structured_component_plan(n,k,capacity,rotation_capacity,
+      stream->get(),allocate_callback,this));
+    solver_bytes=bytes;
+    targets=static_cast<int*>(allocate(capacity*sizeof(int)));
+    matrices=static_cast<double*>(allocate(size_t(capacity)*n*n*sizeof(double)));
+    rows=static_cast<double*>(allocate(size_t(capacity)*n*sizeof(double)));
+    totals=static_cast<double*>(allocate(capacity*sizeof(double)));
+    centered=static_cast<double*>(allocate(size_t(capacity)*n*k*sizeof(double)));
+    std::iota(host_targets.begin(),host_targets.end(),0);
+    check_cuda(cudaMemcpyAsync(targets,host_targets.data(),capacity*sizeof(int),
+      cudaMemcpyHostToDevice,stream->get()),"initialize structured target indices");
+  }
+  ~StructuredComponentLane() {
+    if (stream) (void)cudaStreamSynchronize(stream->get());
+  }
+  void submit(const double* residuals, int count, cudaEvent_t ready) {
+    check_cuda(cudaStreamWaitEvent(stream->get(),ready,0),"structured input dependency");
+    check_cuda(cudaEventRecord(distance_start->get(),stream->get()),"structured distance start");
+    build_distance_rows_batch_kernel<<<dim3(n,count,1),kVerticalBlockSize,0,stream->get()>>>(
+      residuals,targets,n,count,size_t(n)*n,matrices,rows);
+    reduce_rows_batch_kernel<<<count,kVerticalBlockSize,0,stream->get()>>>(rows,n,count,totals);
+    check_cuda(cudaGetLastError(),"structured original totals");
+    check_cuda(cudaEventRecord(eig_start->get(),stream->get()),"structured eig start");
+    view=submit_structured_components(plan.get(),residuals,count);
+    check_cuda(cudaEventRecord(eig_end->get(),stream->get()),"structured eig end");
+  }
+  void read_status(int count) {
+    check_cuda(cudaMemcpyAsync(statuses.data(),view.status,count*sizeof(StructuredComponentStatus),
+      cudaMemcpyDeviceToHost,stream->get()),"structured compact status");
+    check_cuda(cudaEventRecord(completion->get(),stream->get()),"structured status checkpoint");
+    check_cuda(cudaEventSynchronize(completion->get()),"wait structured compact status");
+  }
+  int n,k,capacity;
+  VerticalCallAccounting* accounting;
+  size_t bytes=0,solver_bytes=0;
+  std::vector<StructuredComponentStatus> statuses;
+  std::vector<int> host_targets;
+  std::unique_ptr<TrackedCudaStream> stream;
+  std::unique_ptr<TrackedCudaEvent> distance_start,eig_start,eig_end,completion;
+  std::vector<std::unique_ptr<TrackedDeviceBuffer>> buffers;
+  std::unique_ptr<StructuredComponentPlan,StructuredPlanDeleter> plan;
+  StructuredComponentView view{};
+  int* targets=nullptr;
+  double *matrices=nullptr,*rows=nullptr,*totals=nullptr,*centered=nullptr;
+ private:
+  void* allocate(size_t size) {
+    auto buffer=std::make_unique<TrackedDeviceBuffer>(size,accounting);
+    void* ptr=buffer->get(); buffers.push_back(std::move(buffer)); bytes+=size; return ptr;
+  }
+  static void* allocate_callback(void* owner,size_t size) {
+    return static_cast<StructuredComponentLane*>(owner)->allocate(size);
+  }
+};
+
 class FullCudaCiLegacyEigComponentCache {
  public:
   FullCudaCiLegacyEigComponentCache(
@@ -1655,6 +1831,7 @@ class FullCudaCiLegacyEigComponentCache {
         entry_value_count_(vector_value_count_ +
           static_cast<std::size_t>(num_col) + 2U),
         capacity_entries_(capacity_entries),
+        component_capacity_(maximum_component_count),
         residual_bypass_enabled_(residual_bypass_enabled),
         storage_(checked_multiply(
           checked_multiply(capacity_entries_, entry_value_count_,
@@ -1689,8 +1866,239 @@ class FullCudaCiLegacyEigComponentCache {
   FullCudaCiLegacyEigComponentCache& operator=(
       const FullCudaCiLegacyEigComponentCache&) = delete;
 
+  ~FullCudaCiLegacyEigComponentCache() {
+    // In particular, keep detached residuals and cache slots alive on errors.
+    if (!level_stats_.empty() && execution_context_) {
+      int caller_device = -1;
+      cudaGetDevice(&caller_device);
+      cudaSetDevice(device_id_);
+      structured_lanes_.clear();  // Join producers before residual/cache owners die.
+      cudaStreamSynchronize(execution_context_->stream());
+      if (caller_device >= 0) cudaSetDevice(caller_device);
+    }
+  }
+
+  bool level_prefill_active() const { return level_active_; }
+  void configure_structured(bool enabled) {
+    if (level_active_ || !level_stats_.empty() || !keys_.empty())
+      throw std::runtime_error("structured producer configuration is immutable");
+    structured_enabled_ = enabled;
+  }
+#ifdef FASTKPC_STRUCTURED_TESTING
+  bool test_dense_failure = false;
+#endif
+  bool gram_pending(const std::string& key) const {
+    const auto found = keys_.find(key);
+    return found != keys_.end() && found->second.gram_pending;
+  }
+
+  void begin_level(int level, std::size_t planned) {
+    if (structured_poisoned_ || level < 2 || (level == 2 && !structured_enabled_) ||
+        level_active_ || !execution_context_ ||
+        !residual_bypass_enabled_ || planned == 0 || planned > capacity_entries_) {
+      throw std::runtime_error("level component prefill capacity/lifecycle failed closed");
+    }
+    const ScopedPrefillDevice device_scope(device_id_);
+    // The same producer stream records every consumer completion. Recording a
+    // new event also covers the no-consumer case and is safe before slot reuse.
+    check_cuda(cudaEventRecord(execution_context_->completion(),
+      execution_context_->stream()), "record cache reset boundary");
+    check_cuda(cudaEventSynchronize(execution_context_->completion()),
+               "wait for final cache reader before reset");
+    for (const auto& item : keys_) {
+      if (item.second.gram_pending) ++discarded_pending_;
+      else ++discarded_complete_;
+    }
+    keys_.clear();
+    next_slot_ = 0;
+    ++reset_count_;
+    residual_keys_.clear();
+    residual_keys_.reserve(planned);
+    residual_key_set_.clear();
+    const std::size_t bytes = checked_multiply(
+      checked_multiply(planned, static_cast<std::size_t>(n_),
+                       "level residual values"), sizeof(double), "level residual bytes");
+    level_residuals_ = std::make_unique<TrackedDeviceBuffer>(bytes, &accounting_);
+    if (!gather_start_) {
+      gather_start_ = std::make_unique<TrackedCudaEvent>(true);
+      gather_end_ = std::make_unique<TrackedCudaEvent>(true);
+      gram_end_ = std::make_unique<TrackedCudaEvent>(true);
+    }
+    FullCudaCiLevelComponentPrefillStats stats;
+    stats.level = level;
+    stats.planned = planned;
+    stats.residual_peak_bytes = bytes;
+    level_stats_.push_back(stats);
+    level_active_ = true;
+    level_built_ = false;
+  }
+
+  void store_residual(const MultiPenaltyGcvCudaResidualConsumerView& view) {
+    const auto started = std::chrono::steady_clock::now();
+    const ScopedPrefillDevice device_scope(device_id_);
+    const auto count = static_cast<std::size_t>(view.target_count);
+    if (!level_active_ || level_built_ || view.n != n_ ||
+        view.device_id != device_id_ || !view.fixed_sp_evaluation ||
+        view.target_count < 1 || view.target_count > 16 || !view.residuals ||
+        !view.producer_completion_event || view.target_keys.size() != count ||
+        view.solver_info.size() != count || view.decomposition_route.size() != count ||
+        view.numerical_rank.size() != count ||
+        residual_keys_.size() + count > level_stats_.back().planned) {
+      throw std::runtime_error("level component residual identity failed closed");
+    }
+    for (std::size_t i = 0; i < count; ++i) {
+      if (!is_lower_sha256(view.target_keys[i]) || view.solver_info[i] != 0 ||
+          view.decomposition_route[i] != kMultiPenaltyGcvDecompositionStableSvd ||
+          view.numerical_rank[i] < 1 ||
+          !residual_key_set_.insert(view.target_keys[i]).second) {
+        throw std::runtime_error("level component residual metadata failed closed");
+      }
+    }
+    auto* context = execution_context_.get();
+    check_cuda(cudaStreamWaitEvent(context->stream(), view.producer_completion_event, 0),
+               "wait for level residual finalizer");
+    const std::size_t bytes = count * n_ * sizeof(double);
+    check_cuda(cudaMemcpyAsync(
+      static_cast<double*>(level_residuals_->get()) + residual_keys_.size() * n_,
+      view.residuals, bytes, cudaMemcpyDeviceToDevice, context->stream()),
+      "detach level component residuals");
+    check_cuda(cudaEventRecord(context->completion(), context->stream()),
+               "record level residual detach");
+    check_cuda(cudaEventSynchronize(context->completion()),
+               "finish detach before finalizer and coefficient staging reuse");
+    residual_keys_.insert(residual_keys_.end(), view.target_keys.begin(), view.target_keys.end());
+    auto& stats = level_stats_.back();
+    stats.residual_targets += count;
+    ++stats.residual_batches;
+    stats.residual_d2d_bytes += bytes;
+    stats.residual_copy_host_ms += host_elapsed_ms(started);
+  }
+
+  void build_level() {
+    if (structured_poisoned_ || !level_active_ || level_built_ ||
+        residual_keys_.size() != level_stats_.back().planned) {
+      throw std::runtime_error("level component prefill coverage failed closed");
+    }
+    const ScopedPrefillDevice device_scope(device_id_);
+    const auto started = std::chrono::steady_clock::now();
+    auto* context = execution_context_.get();
+    auto stream = context->stream();
+    auto& stats = level_stats_.back();
+    if (structured_enabled_) {
+      try { build_structured_level(); }
+      catch (...) { structured_poisoned_ = true; throw; }
+    } else {
+    for (std::size_t offset = 0; offset < residual_keys_.size(); offset += component_capacity_) {
+      const int count = static_cast<int>(std::min(
+        static_cast<std::size_t>(component_capacity_), residual_keys_.size() - offset));
+      context->require_capacity(count, 1);
+      std::vector<int> targets(count), solver_info(count, -1);
+      std::iota(targets.begin(), targets.end(), 0);
+      check_cuda(cudaMemcpyAsync(context->component_targets(), targets.data(),
+        count * sizeof(int), cudaMemcpyHostToDevice, stream), "copy prefill component targets");
+      submit_legacy_three_fields(context,
+        static_cast<double*>(level_residuals_->get()) + offset * n_, n_, num_col_, count);
+      for (int i = 0; i < count; ++i) {
+        std::size_t slot;
+        if (!reserve_slot(&slot)) throw std::runtime_error("prefill reserve failed closed");
+        check_cuda(cudaMemcpyAsync(vectors(slot), context->vectors() + i * vector_value_count_,
+          vector_value_count_ * sizeof(double), cudaMemcpyDeviceToDevice, stream),
+          "store prefetched vectors");
+        check_cuda(cudaMemcpyAsync(selected_values(slot), context->selected_values() + i * num_col_,
+          num_col_ * sizeof(double), cudaMemcpyDeviceToDevice, stream), "store prefetched eigenvalues");
+        check_cuda(cudaMemcpyAsync(total(slot), context->totals() + i,
+          sizeof(double), cudaMemcpyDeviceToDevice, stream), "store prefetched total");
+        check_cuda(cudaMemsetAsync(self_moment(slot), 0xff, sizeof(double), stream),
+          "poison pending self moment");
+        commit(residual_keys_[offset + i], slot, FixedSpRoute::AugmentedSvd,
+               FixedSpStatus::OkAugmentedSvd);
+        keys_.at(residual_keys_[offset + i]).gram_pending = true;
+      }
+      check_cuda(cudaEventRecord(context->finalize_end(), stream), "record three field store");
+      check_cuda(cudaMemcpyAsync(solver_info.data(), context->solver_info(),
+        count * sizeof(int), cudaMemcpyDeviceToHost, stream), "read compact prefill eig status");
+      check_cuda(cudaEventRecord(context->completion(), stream), "record prefill batch completion");
+      check_cuda(cudaEventSynchronize(context->completion()), "wait for prefill eig status");
+      if (std::any_of(solver_info.begin(), solver_info.end(), [](int x) { return x != 0; }))
+        throw std::runtime_error("prefill eig failed closed");
+      stats.produced += count;
+      ++stats.prefill_batches;
+      stats.three_field_store_bytes += count * (entry_value_count_ - 1) * sizeof(double);
+      stats.distance_cuda_ms += cuda_elapsed_ms(context->distance_start(), context->distance_end());
+      stats.eig_cuda_ms += cuda_elapsed_ms(context->eig_start(), context->eig_end());
+      stats.selection_store_cuda_ms += cuda_elapsed_ms(context->eig_end(), context->finalize_end());
+    }
+    }
+    // The final completion above covers all lane joins and cache stores.
+    level_residuals_.reset();
+    residual_keys_.clear();
+    residual_key_set_.clear();
+    level_built_ = true;
+    stats.prefill_host_ms += host_elapsed_ms(started);
+  }
+
+  void resolve_gram(const std::vector<std::string>& keys) {
+    if (structured_poisoned_ || !level_active_ || !level_built_ || keys.empty())
+      throw std::runtime_error("pending Gram lifecycle failed closed");
+    const ScopedPrefillDevice device_scope(device_id_);
+    auto* context = execution_context_.get();
+    auto stream = context->stream();
+    context->require_capacity(static_cast<int>(keys.size()), 1);
+    check_cuda(cudaEventRecord(gather_start_->get(), stream), "record Gram gather start");
+    for (std::size_t i = 0; i < keys.size(); ++i) {
+      const auto& entry = keys_.at(keys[i]);
+      if (!entry.gram_pending) throw std::runtime_error("Gram resolved twice");
+      check_cuda(cudaMemcpyAsync(context->vectors() + i * vector_value_count_, vectors(entry.slot),
+        vector_value_count_ * sizeof(double), cudaMemcpyDeviceToDevice, stream), "gather pending vectors");
+      check_cuda(cudaMemcpyAsync(context->selected_values() + i * num_col_, selected_values(entry.slot),
+        num_col_ * sizeof(double), cudaMemcpyDeviceToDevice, stream), "gather pending eigenvalues");
+    }
+    check_cuda(cudaEventRecord(gather_end_->get(), stream), "record Gram gather end");
+    submit_legacy_gram(context, n_, num_col_, static_cast<int>(keys.size()));
+    for (std::size_t i = 0; i < keys.size(); ++i) {
+      auto& entry = keys_.at(keys[i]);
+      check_cuda(cudaMemcpyAsync(self_moment(entry.slot), context->self_moments() + i,
+        sizeof(double), cudaMemcpyDeviceToDevice, stream), "commit deferred self moment");
+      // Ready for downstream work on THIS stream. No other consumer stream is allowed.
+      entry.gram_pending = false;
+    }
+    check_cuda(cudaEventRecord(gram_end_->get(), stream), "record deferred Gram end");
+    auto& stats = level_stats_.back();
+    stats.resolved += keys.size();
+    ++stats.resolve_batches;
+    stats.gather_d2d_bytes += keys.size() * (vector_value_count_ + num_col_) * sizeof(double);
+    stats.self_moment_store_bytes += keys.size() * sizeof(double);
+  }
+
+  void finish_gram_timing() {
+    const ScopedPrefillDevice device_scope(device_id_);
+    auto& stats = level_stats_.back();
+    stats.gather_cuda_ms += cuda_elapsed_ms(gather_start_->get(), gather_end_->get());
+    stats.gram_cuda_ms += cuda_elapsed_ms(gather_end_->get(), gram_end_->get());
+  }
+  void record_level_requests(std::size_t count) {
+    if (level_active_) level_stats_.back().requests += count;
+  }
+  void finish_level() {
+    if (!level_active_ || !level_built_) throw std::runtime_error("prefill finish lifecycle changed");
+    const ScopedPrefillDevice device_scope(device_id_);
+    check_cuda(cudaEventRecord(execution_context_->completion(), execution_context_->stream()),
+               "record last level component reader");
+    check_cuda(cudaEventSynchronize(execution_context_->completion()), "finish level component readers");
+    auto& stats = level_stats_.back();
+    stats.pending_at_end = std::count_if(keys_.begin(), keys_.end(),
+      [](const auto& entry) { return entry.second.gram_pending; });
+    if (stats.produced != stats.planned || stats.residual_targets != stats.planned ||
+        stats.pending_at_end + stats.resolved != stats.planned ||
+        keys_.size() != stats.planned) throw std::runtime_error("level prefill ledger failed closed");
+    stats.finished = true;
+    level_active_ = false;
+  }
+
   bool lookup(const std::string& key, std::size_t* slot,
               FixedSpRoute* route, FixedSpStatus* status) {
+    if (structured_poisoned_ || (level_active_ && !level_built_))
+      throw std::runtime_error("component producer unfinished or failed closed");
     if (slot == nullptr || route == nullptr || status == nullptr ||
         !is_lower_sha256(key)) {
       throw std::runtime_error("legacy eig component cache lookup is invalid");
@@ -1701,6 +2109,9 @@ class FullCudaCiLegacyEigComponentCache {
       miss_count_ += 1U;
       return false;
     }
+    if (found->second.component_solver != 2 &&
+        !(structured_enabled_ && found->second.component_solver == 1))
+      throw std::runtime_error("component eig solver identity mismatch");
     hit_count_ += 1U;
     *slot = found->second.slot;
     *route = found->second.route;
@@ -1722,14 +2133,15 @@ class FullCudaCiLegacyEigComponentCache {
   }
 
   void commit(const std::string& key, std::size_t slot,
-              FixedSpRoute route, FixedSpStatus status) {
+              FixedSpRoute route, FixedSpStatus status, int component_solver = 2) {
     if (!is_lower_sha256(key) || slot >= next_slot_ ||
         route == FixedSpRoute::Unset ||
+        (component_solver != 2 && !(structured_enabled_ && component_solver == 1)) ||
         !is_successful_fixed_sp_status(status)) {
       throw std::runtime_error("legacy eig component cache commit is invalid");
     }
     const auto inserted = keys_.emplace(
-      key, EntryMetadata{slot, route, status});
+      key, EntryMetadata{slot, route, status, false, component_solver});
     if (!inserted.second || inserted.first->second.slot != slot) {
       throw std::runtime_error(
         "legacy eig component cache key was committed twice");
@@ -1782,14 +2194,151 @@ class FullCudaCiLegacyEigComponentCache {
     value.execution_context_device_bytes = execution_context_ ?
       execution_context_->device_bytes() : 0U;
     value.residual_bypass_enabled = residual_bypass_enabled_;
+    value.reset_count = reset_count_;
+    value.discarded_complete = discarded_complete_;
+    value.discarded_pending = discarded_pending_;
+    value.level_prefill = level_stats_;
     return value;
   }
 
  private:
+
+  void store_three_fields(std::size_t slot, const double* v, const double* values,
+                          const double* sum, cudaStream_t stream) {
+    check_cuda(cudaMemcpyAsync(vectors(slot),v,vector_value_count_*sizeof(double),
+      cudaMemcpyDeviceToDevice,stream),"structured cache vectors");
+    check_cuda(cudaMemcpyAsync(selected_values(slot),values,num_col_*sizeof(double),
+      cudaMemcpyDeviceToDevice,stream),"structured cache eigenvalues");
+    check_cuda(cudaMemcpyAsync(total(slot),sum,sizeof(double),cudaMemcpyDeviceToDevice,stream),
+      "structured cache original total");
+    check_cuda(cudaMemsetAsync(self_moment(slot),0xff,sizeof(double),stream),
+      "poison structured pending self moment");
+  }
+
+  void build_structured_level() {
+    constexpr int width=64, max_contexts=10;
+    auto& stats=level_stats_.back();
+    const int contexts=static_cast<int>(std::min<std::size_t>(
+      max_contexts,(residual_keys_.size()+width-1)/width));
+    const auto creation_started=std::chrono::steady_clock::now();
+    const bool create=static_cast<int>(structured_lanes_.size())<contexts;
+    while (static_cast<int>(structured_lanes_.size())<contexts)
+      structured_lanes_.push_back(std::make_unique<StructuredComponentLane>(
+        n_,num_col_,width,&accounting_));
+    if (create) stats.structured_create_host_ms=host_elapsed_ms(creation_started);
+    stats.structured_contexts=contexts; stats.structured_width=width;
+    for (const auto& lane:structured_lanes_) {
+      stats.structured_solver_bytes+=lane->solver_bytes;
+      stats.structured_pool_bytes+=lane->bytes;
+    }
+    std::size_t free_bytes=0,total_bytes=0;
+    check_cuda(cudaMemGetInfo(&free_bytes,&total_bytes),"sample structured memory");
+    stats.sampled_device_used_bytes=total_bytes-free_bytes;
+    auto* context=execution_context_.get();
+    auto stream=context->stream();
+    check_cuda(cudaEventRecord(context->completion(),stream),"structured residual arena ready");
+
+    for (std::size_t base=0; base<residual_keys_.size(); base+=contexts*width) {
+      const int wave_count=static_cast<int>(std::min<std::size_t>(
+        contexts*width,residual_keys_.size()-base));
+      const int active=(wave_count+width-1)/width;
+      stats.structured_peak_inflight=std::max(stats.structured_peak_inflight,wave_count);
+      ++stats.structured_waves;
+      std::vector<std::size_t> slots(wave_count);
+      std::vector<int> solver_identity(wave_count,1);
+      for (auto& slot:slots)
+        if (!reserve_slot(&slot)) throw std::runtime_error("structured cache capacity failed closed");
+      // Submit every independent lane before the first bounded status checkpoint.
+      for (int l=0;l<active;++l) {
+        const int count=std::min(width,wave_count-l*width);
+        structured_lanes_[l]->submit(
+          static_cast<const double*>(level_residuals_->get())+(base+l*width)*n_,
+          count,context->completion());
+      }
+      for (int l=0;l<active;++l) {
+        auto& lane=*structured_lanes_[l];
+        const int count=std::min(width,wave_count-l*width);
+        lane.read_status(count);
+        std::vector<int> fallback;
+        for (int i=0;i<count;++i) {
+          const auto& status=lane.statuses[i];
+          stats.rotations_max=std::max(stats.rotations_max,status.rotations);
+          if (status.info==0 && std::isfinite(status.gap)) {
+            stats.structured_minimum_gap=std::min(stats.structured_minimum_gap,status.gap);
+            if (status.gap<1e-4) ++stats.small_gap_count;
+          }
+          if (status.reason) {
+            if (status.reason==StructuredInfo) ++stats.fallback_info;
+            else if (status.reason==StructuredRotationOverflow) ++stats.fallback_rotation;
+            else if (status.reason==StructuredBoundaryGap) ++stats.fallback_gap;
+            else throw std::runtime_error("unknown structured fallback reason");
+            fallback.push_back(i); solver_identity[l*width+i]=2;
+            ++stats.dense_fallback;
+          } else ++stats.structured_accepted;
+        }
+        center_structured_component_kernel<<<count,kVerticalBlockSize,0,lane.stream->get()>>>(
+          lane.view.vectors,lane.view.status,n_,num_col_,count,lane.centered);
+        check_cuda(cudaGetLastError(),"center structured selected vectors");
+        for (int i=0;i<count;++i) if (!lane.statuses[i].reason)
+          store_three_fields(slots[l*width+i],lane.centered+size_t(i)*vector_value_count_,
+            lane.view.values+size_t(i)*(num_col_+1),lane.totals+i,lane.stream->get());
+        check_cuda(cudaEventRecord(lane.completion->get(),lane.stream->get()),
+          "structured payload stores complete");
+        check_cuda(cudaStreamWaitEvent(stream,lane.completion->get(),0),
+          "join structured payload stores");
+        // The existing dense context remains p-wide, regardless of producer width.
+        for (std::size_t off=0;off<fallback.size();off+=component_capacity_) {
+          const int size=static_cast<int>(std::min<std::size_t>(
+            component_capacity_,fallback.size()-off));
+          context->require_capacity(size,1);
+          std::vector<int> info(size,-1);
+          check_cuda(cudaMemcpyAsync(context->component_targets(),fallback.data()+off,
+            size*sizeof(int),cudaMemcpyHostToDevice,stream),"structured dense fallback indices");
+          submit_legacy_three_fields(context,
+            static_cast<const double*>(level_residuals_->get())+(base+l*width)*n_,
+            n_,num_col_,size);
+          check_cuda(cudaMemcpyAsync(info.data(),context->solver_info(),size*sizeof(int),
+            cudaMemcpyDeviceToHost,stream),"structured dense fallback status");
+          check_cuda(cudaEventRecord(context->completion(),stream),"dense fallback checkpoint");
+          check_cuda(cudaEventSynchronize(context->completion()),"wait dense fallback status");
+#ifdef FASTKPC_STRUCTURED_TESTING
+          if (test_dense_failure) info[0]=-92;
+#endif
+          if (std::any_of(info.begin(),info.end(),[](int x){return x!=0;}))
+            throw std::runtime_error("structured dense fallback failed closed; no wave published");
+          for (int i=0;i<size;++i) {
+            const int original=fallback[off+i];
+            store_three_fields(slots[l*width+original],
+              context->vectors()+size_t(i)*vector_value_count_,
+              context->selected_values()+size_t(i)*num_col_,context->totals()+i,stream);
+          }
+          ++stats.dense_fallback_batches;
+          stats.eig_cuda_ms+=cuda_elapsed_ms(context->eig_start(),context->eig_end());
+        }
+        stats.distance_cuda_ms+=cuda_elapsed_ms(lane.distance_start->get(),lane.eig_start->get());
+        stats.structured_lane_cuda_ms_sum+=cuda_elapsed_ms(lane.eig_start->get(),lane.eig_end->get());
+        ++stats.prefill_batches;
+      }
+      // This includes every structured D2D store AND every dense fallback store.
+      check_cuda(cudaEventRecord(context->completion(),stream),"structured wave complete");
+      check_cuda(cudaEventSynchronize(context->completion()),"join full structured wave");
+      for (int i=0;i<wave_count;++i) {
+        commit(residual_keys_[base+i],slots[i],FixedSpRoute::AugmentedSvd,
+          FixedSpStatus::OkAugmentedSvd,solver_identity[i]);
+        keys_.at(residual_keys_[base+i]).gram_pending=true;
+      }
+      stats.produced+=wave_count;
+      stats.three_field_store_bytes+=wave_count*(entry_value_count_-1)*sizeof(double);
+    }
+  }
+
   struct EntryMetadata {
     std::size_t slot = 0U;
     FixedSpRoute route = FixedSpRoute::Unset;
     FixedSpStatus status = FixedSpStatus::ErrInternalCuda;
+    bool gram_pending = false;
+    // 1: structured-device-three-field-v1; 2: retained-dense-three-field-v1.
+    int component_solver = 2;
   };
 
   double* entry(std::size_t slot) const {
@@ -1805,6 +2354,7 @@ class FullCudaCiLegacyEigComponentCache {
   std::size_t vector_value_count_ = 0U;
   std::size_t entry_value_count_ = 0U;
   std::size_t capacity_entries_ = 0U;
+  int component_capacity_ = 0;
   bool residual_bypass_enabled_ = false;
   std::size_t next_slot_ = 0U;
   VerticalCallAccounting accounting_;
@@ -1817,7 +2367,45 @@ class FullCudaCiLegacyEigComponentCache {
   std::uint64_t miss_count_ = 0U;
   std::uint64_t insert_count_ = 0U;
   std::uint64_t bypass_count_ = 0U;
+  bool level_active_ = false, level_built_ = false;
+  std::uint64_t reset_count_ = 0, discarded_complete_ = 0, discarded_pending_ = 0;
+  std::vector<FullCudaCiLevelComponentPrefillStats> level_stats_;
+  std::unique_ptr<TrackedDeviceBuffer> level_residuals_;
+  std::vector<std::string> residual_keys_;
+  std::unordered_set<std::string> residual_key_set_;
+  std::unique_ptr<TrackedCudaEvent> gather_start_, gather_end_, gram_end_;
+  bool structured_enabled_ = false, structured_poisoned_ = false;
+  std::vector<std::unique_ptr<StructuredComponentLane>> structured_lanes_;
 };
+
+void configure_full_cuda_ci_structured_prefill(
+    const std::shared_ptr<FullCudaCiLegacyEigComponentCache>& cache, bool enabled) {
+  if (!cache) throw std::runtime_error("structured prefill requires component cache");
+  cache->configure_structured(enabled);
+}
+
+void begin_full_cuda_ci_level_component_prefill(
+    const std::shared_ptr<FullCudaCiLegacyEigComponentCache>& cache,
+    int level, std::size_t planned) {
+  if (!cache) throw std::runtime_error("level prefill requires component cache");
+  cache->begin_level(level, planned);
+}
+void store_full_cuda_ci_level_component_residual(
+    const std::shared_ptr<FullCudaCiLegacyEigComponentCache>& cache,
+    const MultiPenaltyGcvCudaResidualConsumerView& residual) {
+  if (!cache) throw std::runtime_error("level residual store requires cache");
+  cache->store_residual(residual);
+}
+void build_full_cuda_ci_level_components(
+    const std::shared_ptr<FullCudaCiLegacyEigComponentCache>& cache) {
+  if (!cache) throw std::runtime_error("level build requires cache");
+  cache->build_level();
+}
+void finish_full_cuda_ci_level_component_prefill(
+    const std::shared_ptr<FullCudaCiLegacyEigComponentCache>& cache) {
+  if (!cache) throw std::runtime_error("level finish requires cache");
+  cache->finish_level();
+}
 
 namespace {
 
@@ -3029,6 +3617,7 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch_impl(
     static_cast<std::size_t>(component_count), -1);
   std::vector<int> miss_targets;
   std::vector<std::string> miss_keys;
+  std::vector<std::string> pending_gram_keys;
   miss_targets.reserve(static_cast<std::size_t>(component_count));
   miss_keys.reserve(static_cast<std::size_t>(component_count));
   for (int component = 0; component < component_count; ++component) {
@@ -3042,7 +3631,11 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch_impl(
       &component_cache_statuses[static_cast<std::size_t>(component)]);
     component_cache_slots[static_cast<std::size_t>(component)] = slot;
     component_cache_hits[static_cast<std::size_t>(component)] = hit ? 1U : 0U;
+    if (hit && component_cache->gram_pending(key)) pending_gram_keys.push_back(key);
     if (!hit) {
+      if (component_cache && component_cache->level_prefill_active()) {
+        throw std::runtime_error("level component prefill unexpected miss failed closed");
+      }
       component_to_miss[static_cast<std::size_t>(component)] =
         static_cast<int>(miss_targets.size());
       miss_targets.push_back(target);
@@ -3054,6 +3647,7 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch_impl(
     }
   }
   const int miss_count = static_cast<int>(miss_targets.size());
+  if (component_cache) component_cache->record_level_requests(component_count);
   const bool residual_cache_bypass = component_cache && miss_count == 0 &&
     component_cache->residual_bypass_enabled();
   std::vector<int> left_components(static_cast<std::size_t>(pair_count));
@@ -3117,6 +3711,9 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch_impl(
   result.prepared_s_key_sha256 = prepared_info.prepared_s_key_sha256;
   result.target_keys = batch.target_keys;
   FullCudaCiLegacyEigBatchDiagnostics& diagnostics = result.diagnostics;
+  if (request.audit_component_order) {
+    diagnostics.gram_component_keys = pending_gram_keys.empty() ? miss_keys : pending_gram_keys;
+  }
   diagnostics.component_semantic_version =
     kFullCudaCiLegacyEigComponentSemanticVersion;
   diagnostics.n = batch.n;
@@ -3324,6 +3921,11 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch_impl(
         "wait for legacy eig residual producer");
     }
 
+    // Gram scratch is needed even with zero eig misses. The cache method
+    // checks its capacity independently and queues the D2D/Gram/store before
+    // any pair metadata or pair kernel on this same persistent stream.
+    if (!pending_gram_keys.empty()) component_cache->resolve_gram(pending_gram_keys);
+
     std::vector<std::uintptr_t> pair_metadata(pair_metadata_word_count, 0U);
     double* vectors = miss_count > 0 ? execution_context->vectors() : nullptr;
     double* selected_values = miss_count > 0 ?
@@ -3411,62 +4013,14 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch_impl(
     const double one = 1.0;
     const double zero = 0.0;
     if (miss_count > 0) {
-      check_cuda(cudaEventRecord(execution_context->distance_start(), stream),
-                 "record legacy eig distance start");
-      const dim3 distance_grid(
-        static_cast<unsigned int>(batch.n),
-        static_cast<unsigned int>(miss_count), 1U);
-      build_distance_rows_batch_kernel<<<
-        distance_grid, kVerticalBlockSize, 0, stream
-      >>>(
-        residual_view.residuals,
-        static_cast<const int*>(execution_context->component_targets()), batch.n,
-        miss_count, cell_count,
-        execution_context->component_matrices(),
-        execution_context->row_sums());
-      check_cuda(cudaGetLastError(), "launch legacy eig distance rows");
-      reduce_rows_batch_kernel<<<
-        static_cast<unsigned int>(miss_count), kVerticalBlockSize,
-        0, stream
-      >>>(
-        execution_context->row_sums(), batch.n,
-        miss_count, execution_context->totals());
-      check_cuda(cudaGetLastError(), "launch legacy eig distance totals");
-      check_cuda(cudaEventRecord(execution_context->distance_end(), stream),
-                 "record legacy eig distance end");
       diagnostics.eig_workspace_bytes =
         execution_context->eig_workspace_bytes();
       diagnostics.component_eig_active_lane_count =
-        execution_context->submit_eigensolves(miss_count);
+        submit_legacy_three_fields(execution_context, residual_view.residuals,
+                                  batch.n, num_col, miss_count);
       diagnostics.component_eig_multilane_batch_count =
         diagnostics.component_eig_active_lane_count > 1 ? 1 : 0;
-      double* component_matrices = execution_context->component_matrices();
-      double* all_eigenvalues = execution_context->eigenvalues();
-      select_center_legacy_eigencomponent_kernel<<<
-        static_cast<unsigned int>(miss_count), kVerticalBlockSize,
-        n_size * sizeof(unsigned char), stream
-      >>>(
-        all_eigenvalues, component_matrices, batch.n, num_col, miss_count,
-        execution_context->selected_values(), vectors);
-      check_cuda(cudaGetLastError(),
-                 "launch legacy eig component selection");
-      check_cublas(cublasDgemmStridedBatched(
-        execution_context->blas(), CUBLAS_OP_T, CUBLAS_OP_N,
-        num_col, num_col, batch.n, &one,
-        vectors, batch.n, static_cast<long long>(vector_stride),
-        vectors, batch.n, static_cast<long long>(vector_stride),
-        &zero, execution_context->component_grams(), num_col,
-        static_cast<long long>(cross_stride), miss_count),
-        "form legacy eig component Gram matrices");
-      reduce_legacy_self_moment_kernel<<<
-        static_cast<unsigned int>(miss_count), kVerticalBlockSize,
-        0, stream
-      >>>(
-        execution_context->component_grams(),
-        execution_context->selected_values(),
-        miss_count, num_col,
-        execution_context->self_moments());
-      check_cuda(cudaGetLastError(), "launch legacy eig self moments");
+      submit_legacy_gram(execution_context, batch.n, num_col, miss_count);
       const std::size_t selected_value_bytes = k_size * sizeof(double);
       const std::size_t vector_bytes = vector_stride * sizeof(double);
       for (int component = 0; component < component_count; ++component) {
@@ -3588,6 +4142,7 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch_impl(
     diagnostics.explicit_host_wait_count += 1;
     diagnostics.metadata_h2d_cuda_ms = cuda_elapsed_ms(
       execution_context->metadata_start(), execution_context->metadata_end());
+    if (!pending_gram_keys.empty()) component_cache->finish_gram_timing();
     if (miss_count > 0) {
       diagnostics.distance_build_cuda_ms = cuda_elapsed_ms(
         execution_context->distance_start(), execution_context->distance_end());

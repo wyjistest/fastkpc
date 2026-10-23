@@ -226,9 +226,12 @@ struct FullCudaCiLegacyEigBatchRequest {
   std::vector<FullCudaCiExactBatchPairRequest> pairs;
   int component_capacity = 0;
   int num_col = 35;
+  bool audit_component_order = false;
 };
 
 struct FullCudaCiLegacyEigBatchDiagnostics {
+  // Ordered first-use keys: ordinary cache misses, or deferred Gram entries.
+  std::vector<std::string> gram_component_keys;
   std::string component_semantic_version;
   int n = 0;
   int target_count = 0;
@@ -310,6 +313,30 @@ struct FullCudaCiLegacyEigBatchDiagnostics {
   bool caller_device_restored = false;
 };
 
+struct FullCudaCiLevelComponentPrefillStats {
+  int level = -1;
+  std::uint64_t planned = 0, residual_targets = 0, residual_batches = 0;
+  std::uint64_t produced = 0, prefill_batches = 0;
+  std::uint64_t resolved = 0, resolve_batches = 0, requests = 0;
+  std::size_t residual_d2d_bytes = 0, three_field_store_bytes = 0;
+  std::size_t gather_d2d_bytes = 0, self_moment_store_bytes = 0;
+  std::size_t pending_at_end = 0, residual_peak_bytes = 0;
+  double residual_copy_host_ms = 0, prefill_host_ms = 0;
+  double distance_cuda_ms = 0, eig_cuda_ms = 0, selection_store_cuda_ms = 0;
+  double gather_cuda_ms = 0, gram_cuda_ms = 0;
+  std::uint64_t structured_accepted = 0, dense_fallback = 0;
+  std::uint64_t fallback_info = 0, fallback_rotation = 0, fallback_gap = 0;
+  std::uint64_t small_gap_count = 0, dense_fallback_batches = 0;
+  std::uint64_t structured_waves = 0;
+  int structured_contexts = 0, structured_width = 0, rotations_max = 0;
+  int structured_peak_inflight = 0;
+  std::size_t structured_solver_bytes = 0, structured_pool_bytes = 0;
+  std::size_t sampled_device_used_bytes = 0;
+  double structured_create_host_ms = 0, structured_lane_cuda_ms_sum = 0;
+  double structured_minimum_gap = 1.0;
+  bool finished = false;
+};
+
 struct FullCudaCiLegacyEigComponentCacheInfo {
   int device_id = -1;
   int n = 0;
@@ -326,6 +353,8 @@ struct FullCudaCiLegacyEigComponentCacheInfo {
   int eig_lane_count = 0;
   std::size_t execution_context_device_bytes = 0;
   bool residual_bypass_enabled = false;
+  std::uint64_t reset_count = 0, discarded_complete = 0, discarded_pending = 0;
+  std::vector<FullCudaCiLevelComponentPrefillStats> level_prefill;
 };
 
 struct FullCudaCiLegacyEigBatchResult {
@@ -469,6 +498,21 @@ std::vector<unsigned char>
 full_cuda_ci_legacy_eig_component_cache_contains(
   const std::shared_ptr<FullCudaCiLegacyEigComponentCache>& cache,
   const std::vector<std::string>& keys);
+
+// Opt-in level-scoped producer. No numerical fields cross the host boundary.
+void configure_full_cuda_ci_structured_prefill(
+  const std::shared_ptr<FullCudaCiLegacyEigComponentCache>& cache, bool enabled);
+
+void begin_full_cuda_ci_level_component_prefill(
+  const std::shared_ptr<FullCudaCiLegacyEigComponentCache>& cache,
+  int level, std::size_t planned);
+void store_full_cuda_ci_level_component_residual(
+  const std::shared_ptr<FullCudaCiLegacyEigComponentCache>& cache,
+  const MultiPenaltyGcvCudaResidualConsumerView& residual);
+void build_full_cuda_ci_level_components(
+  const std::shared_ptr<FullCudaCiLegacyEigComponentCache>& cache);
+void finish_full_cuda_ci_level_component_prefill(
+  const std::shared_ptr<FullCudaCiLegacyEigComponentCache>& cache);
 
 FullCudaCiLegacyEigBatchResult
 run_full_cuda_ci_phase35_legacy_eig_batch_with_component_cache(
