@@ -1,5 +1,7 @@
 #include <cuda_runtime.h>
+#include <cuda_profiler_api.h>
 #include <cusolverDn.h>
+#include <nvtx3/nvToolsExt.h>
 
 #include <algorithm>
 #include <chrono>
@@ -148,10 +150,13 @@ float event_elapsed(cudaEvent_t start, cudaEvent_t stop) {
 void submit_eig(
     Lane* lane, int n, double* matrix, double* eigenvalues, int* info) {
   if (lane == nullptr) throw std::runtime_error("null eig lane");
+  const bool profile = std::getenv("FASTKPC_PROFILE_EIG_LANES") != nullptr;
+  if (profile) nvtxRangePushA("eig.syevd_call");
   check_solver(cusolverDnDsyevd(
     lane->solver.get(), CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_LOWER,
     n, matrix, n, eigenvalues, lane->work->get(), lane->lwork, info),
     "submit deterministic full eig");
+  if (profile) nvtxRangePop();
 }
 
 struct Measurement {
@@ -579,14 +584,19 @@ int main(int argc, char** argv) {
     std::vector<double> alternate_first_batch_duration;
     std::vector<double> alternate_second_batch_duration;
     std::vector<double> alternate_batch_overlap;
+    const bool profile = std::getenv("FASTKPC_PROFILE_EIG_LANES") != nullptr;
+    if (profile) check_cuda(cudaProfilerStart(), "start steady-state eig profile");
     for (int trial = 0; trial < trials; ++trial) {
+      if (profile) nvtxRangePushA("eig.serial");
       const Measurement serial = run_serial(
         n, component_count, cells, source, &serial_matrices,
         &serial_eigenvalues, &serial_info, &serial_lane);
+      if (profile) { nvtxRangePop(); nvtxRangePushA("eig.lanes"); }
       const Measurement concurrent = run_lanes(
         n, 0, component_count, cells, source, &concurrent_matrices,
         &concurrent_eigenvalues, &concurrent_info, pooled_lanes,
         &control, &ready);
+      if (profile) nvtxRangePop();
       serial_submit.push_back(serial.host_submit_ms);
       serial_wall.push_back(serial.host_wall_ms);
       serial_device.push_back(serial.device_makespan_ms);
@@ -618,6 +628,7 @@ int main(int argc, char** argv) {
       separate_wall.push_back(separate.host_wall_ms);
       separate_device.push_back(separate.device_makespan_ms);
       separate_lane_sum.push_back(separate.lane_duration_sum_ms);
+      if (profile) nvtxRangePushA(split_mode ? "eig.split" : "eig.threaded");
       const Measurement alternate = split_mode ?
         run_split_batches(
           n, first_component_count, second_component_count, lanes_per_batch,
@@ -627,6 +638,7 @@ int main(int argc, char** argv) {
           n, component_count, cells, source, &concurrent_matrices,
           &concurrent_eigenvalues, &concurrent_info, pooled_lanes,
           &control, &ready);
+      if (profile) nvtxRangePop();
       threaded_submit.push_back(alternate.host_submit_ms);
       threaded_wall.push_back(alternate.host_wall_ms);
       threaded_device.push_back(alternate.device_makespan_ms);
@@ -637,6 +649,7 @@ int main(int argc, char** argv) {
         alternate.second_batch_duration_ms);
       alternate_batch_overlap.push_back(alternate.batch_overlap_ms);
     }
+    if (profile) check_cuda(cudaProfilerStop(), "stop steady-state eig profile");
 
     std::vector<double> host_serial_matrices(matrix_values);
     std::vector<double> host_concurrent_matrices(matrix_values);

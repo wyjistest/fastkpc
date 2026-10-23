@@ -1,0 +1,128 @@
+diff --git a/fastkpc/src/cuda/mgcv_multi_penalty_gcv.cu b/fastkpc/src/cuda/mgcv_multi_penalty_gcv.cu
+index f208403..86c3124 100644
+--- a/fastkpc/src/cuda/mgcv_multi_penalty_gcv.cu
++++ b/fastkpc/src/cuda/mgcv_multi_penalty_gcv.cu
+@@ -117,6 +117,44 @@ void check_cublas(cublasStatus_t status, const char* stage) {
+   }
+ }
+ 
++bool pinned_optimizer_io_enabled() {
++  const char* raw = std::getenv("FASTKPC_MULTI_PENALTY_PINNED_IO");
++  if (raw == nullptr || raw[0] == '\0' || std::string(raw) == "0") {
++    return false;
++  }
++  if (std::string(raw) == "1") return true;
++  throw std::runtime_error("FASTKPC_MULTI_PENALTY_PINNED_IO must be 0 or 1");
++}
++
++template <typename T>
++class PinnedHostBuffer {
++ public:
++  PinnedHostBuffer() = default;
++  PinnedHostBuffer(const PinnedHostBuffer&) = delete;
++  PinnedHostBuffer& operator=(const PinnedHostBuffer&) = delete;
++  ~PinnedHostBuffer() { reset(); }
++
++  void allocate(std::size_t count) {
++    if (data_ != nullptr || count == 0 ||
++        count > std::numeric_limits<std::size_t>::max() / sizeof(T)) {
++      throw std::runtime_error("invalid pinned optimizer buffer capacity");
++    }
++    check_cuda(cudaMallocHost(reinterpret_cast<void**>(&data_),
++                              count * sizeof(T)),
++               "allocate pinned optimizer host buffer");
++  }
++
++  void reset() {
++    if (data_ != nullptr) cudaFreeHost(data_);
++    data_ = nullptr;
++  }
++
++  T* get() { return data_; }
++
++ private:
++  T* data_ = nullptr;
++};
++
+ template <typename T>
+ class DeviceBuffer {
+  public:
+@@ -3362,6 +3400,12 @@ class MultiPenaltyGcvCudaPrepared {
+   MultiPenaltyGcvCudaPrepared() : cublas(stream.get()) {}
+   ~MultiPenaltyGcvCudaPrepared() {
+     if (device_id >= 0) cudaSetDevice(device_id);
++    // Also protect outstanding asynchronous host transfers on exception paths.
++    if (pinned_Y.get() != nullptr || pinned_states.get() != nullptr) {
++      cudaStreamSynchronize(stream.get());
++      pinned_Y.reset();
++      pinned_states.reset();
++    }
+   }
+ 
+   int device_id = -1;
+@@ -3401,6 +3445,8 @@ class MultiPenaltyGcvCudaPrepared {
+   DeviceBuffer<double> d_fitted;
+   DeviceBuffer<double> d_residuals;
+   std::vector<DeviceOptimizerState> host_states;
++  PinnedHostBuffer<double> pinned_Y;
++  PinnedHostBuffer<DeviceOptimizerState> pinned_states;
+   std::vector<int> host_fixed_diagnostics;
+   int decomposition_trace_capacity_per_target = 0;
+   MultiPenaltyGcvCudaPreparedInfo info;
+@@ -5510,6 +5556,11 @@ create_multi_penalty_gcv_cuda_prepared(
+     MultiPenaltyGcvCudaDiagnostics allocation_diagnostics;
+     const std::size_t y_capacity =
+       static_cast<std::size_t>(n) * target_capacity;
++    if (pinned_optimizer_io_enabled()) {
++      prepared->pinned_Y.allocate(y_capacity);
++      prepared->pinned_states.allocate(
++        static_cast<std::size_t>(target_capacity));
++    }
+     const std::size_t q_targets =
+       static_cast<std::size_t>(q) * target_capacity;
+     std::size_t arena_bytes = 0;
+@@ -5768,8 +5819,16 @@ MultiPenaltyGcvCudaBatchResult multi_penalty_gcv_cuda_optimize_batch(
+       diagnostics.cuda_decomposition_trace_capacity_per_target =
+         requested_capacity;
+     }
++    const double* upload_Y = Y;
++    if (prepared->pinned_Y.get() != nullptr) {
++      std::memcpy(prepared->pinned_Y.get(), Y, y_count * sizeof(double));
++      upload_Y = prepared->pinned_Y.get();
++    }
++    DeviceOptimizerState* host_states =
++      prepared->pinned_states.get() != nullptr ?
++        prepared->pinned_states.get() : prepared->host_states.data();
+     check_cuda(cudaMemcpyAsync(
+-      prepared->d_Y.get(), Y, y_count * sizeof(double),
++      prepared->d_Y.get(), upload_Y, y_count * sizeof(double),
+       cudaMemcpyHostToDevice, prepared->stream.get()),
+       "upload persistent multi-penalty target batch");
+     diagnostics.h2d_copy_count = 1;
+@@ -5866,7 +5925,7 @@ MultiPenaltyGcvCudaBatchResult multi_penalty_gcv_cuda_optimize_batch(
+       prepared->completion_event.get(), prepared->stream.get()),
+       "record persistent multi-penalty residual completion");
+     check_cuda(cudaMemcpyAsync(
+-      prepared->host_states.data(), prepared->d_states.get(),
++      host_states, prepared->d_states.get(),
+       static_cast<std::size_t>(target_count) *
+         sizeof(DeviceOptimizerState),
+       cudaMemcpyDeviceToHost, prepared->stream.get()),
+@@ -5910,7 +5969,7 @@ MultiPenaltyGcvCudaBatchResult multi_penalty_gcv_cuda_optimize_batch(
+     }
+     MultiPenaltyGcvCudaBatchResult result;
+     result.optimization = materialize_optimizer_output(
+-      prepared->host_states.data(), n, q, penalty_count, target_count,
++      host_states, n, q, penalty_count, target_count,
+       prepared->initial_log_sp, std::move(diagnostics));
+     result.optimization.diagnostics.total_host_ms =
+       std::chrono::duration<double, std::milli>(
+@@ -5939,7 +5998,7 @@ MultiPenaltyGcvCudaBatchResult multi_penalty_gcv_cuda_optimize_batch(
+     for (int target = 0; target < target_count; ++target) {
+       result.residual->decomposition_route[
+         static_cast<std::size_t>(target)] =
+-          prepared->host_states[static_cast<std::size_t>(target)]
++          host_states[static_cast<std::size_t>(target)]
+             .current.decomposition_route;
+     }
+     result.residual->generation = prepared->generation;

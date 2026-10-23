@@ -44,6 +44,10 @@ fastkpc/artifacts/strict_ci_methods_351x48_permutation_overlap_v1/*
 .Rproj.user/
 .Ruserdata
 
+# Python bytecode
+__pycache__/
+*.py[cod]
+
 # OS/editor files
 .DS_Store
 *.swp
