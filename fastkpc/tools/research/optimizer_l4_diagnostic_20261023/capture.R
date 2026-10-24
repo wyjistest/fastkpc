@@ -1,0 +1,69 @@
+# Capture the complete S2 prefix through L4; shadow output is diagnostic only.
+args<-commandArgs(TRUE);stopifnot(length(args)==1L)
+out<-normalizePath(args[[1L]]);stopifnot(!file.exists(file.path(out,'capture.rds')))
+source('fastkpc/R/fast_kpc.R');source('fastkpc/R/full_cuda_ci_phase35_vertical.R')
+sha<-function(p)digest::digest(file=p,algo='sha256',serialize=FALSE)
+build<-jsonlite::read_json(file.path(out,'capture-build.json'),simplifyVector=TRUE)
+native<-'fastkpc/build/fastkpc_cuda.so'
+stopifnot(sha(native)==build$native_sha256,Sys.getenv('FASTKPC_MULTI_PENALTY_STATUS_WAIT_BEFORE_D2H')=='1')
+Sys.setenv(FASTKPC_DCC_GAMMA_LEVEL_COMPONENT_PREFILL='1',
+ FASTKPC_DCC_GAMMA_STRUCTURED_COMPONENT_PREFILL='1',FASTKPC_DCC_GAMMA_L2_COMPONENT_PREFILL='1',
+ FASTKPC_DCC_GAMMA_L5_OPTIMIZER_SLOTS='1',FASTKPC_DIAG_LEVEL_COMPONENT_ORDER='1')
+dataset<-'fastkpc/artifacts/kpc_tprs_real_zhu/cancer_RD-causalDiscoveryInput.rds'
+data<-as.matrix(readRDS(dataset));stopifnot(identical(dim(data),c(351L,48L)))
+invisible(full_cuda_ci_one_call_cache_control_native('configure',262144L))
+invisible(full_cuda_ci_one_call_cache_control_native('configure_target',131072L))
+invisible(full_cuda_ci_one_call_cache_control_native('reset'))
+set.seed(20261020L);seed<-.Random.seed
+before<-fastkpc_full_cuda_phase35_vertical_resource_snapshot()
+result<-fastkpc_compatible_cuda_skeleton(data,alpha=.1,options=list(route='full_cuda',
+ compatible_cuda_strict=TRUE,max_conditioning_size=4L,index=1,numCol=35L,
+ trace_level='logical',ci_method='dcc.gamma'))
+after<-fastkpc_full_cuda_phase35_vertical_resource_snapshot()
+reference_path<-'fastkpc/artifacts/full_cuda_ci/optimizer_slot_runtime_20261023/on1/receipt.rds'
+reference<-readRDS(reference_path);rt<-subset(reference$result$tasks,level<=4L);row.names(rt)<-NULL
+t<-result$tasks;s<-result$summary
+fields<-c('level','task_index','x','y','S_key','canonical_test_order_id','native_edge_deleted','native_edge_ignored')
+graph<-matrix(TRUE,48,48);diag(graph)<-FALSE
+pmax<-matrix(-Inf,48,48);diag(pmax)<-1
+for(i in seq_len(nrow(rt))){
+ x<-rt$x[i];y<-rt$y[i];pmax[x,y]<-pmax[y,x]<-max(pmax[x,y],rt$p_used[i])
+ if(rt$native_edge_deleted[i])graph[x,y]<-graph[y,x]<-FALSE
+}
+expressions<-parse('fastkpc/tools/run_phase10_pvalue_contract_audit.R')
+for(e in expressions)if(is.call(e)&&identical(e[[1L]],as.name('<-'))&&is.symbol(e[[2L]])&&
+ as.character(e[[2L]])=='canonical_deletion_sepsets')eval(e)
+live<-c('live_device_allocations','live_device_bytes','live_streams','live_events')
+authority<-c('r_callback_count','legacy_mgcv_fit_count','legacy_mgcv_setup_count',
+ 'cpu_residual_solve_count','cpu_dcov_component_count','cpu_dcov_eigen_or_lowrank_count',
+ 'cpu_dcov_pair_stat_count','cpu_gamma_pvalue_count','cpu_spectra_count',
+ 'unknown_fallback_count','approximate_backend_count')
+fixtures<-file.path(out,'raw',paste0('L4-W',1:34,'.bin'))
+b<-subset(s$prefill_batches,level==4L)
+rb<-subset(reference$result$summary$prefill_batches,level<=4L);row.names(rb)<-NULL
+identity<-c('level','penalty_class','window_id','conditioning_group_count','optimizer_setup_count',
+ 'target_optimization_count','singleton_skipped_request_count','singleton_skipped_target_count')
+gates<-list(task_identity=identical(t[fields],rt[fields]),
+ ci_bits=identical(t$p_used,rt$p_used,num.eq=FALSE),
+ pmax_bits=identical(unname(result$pMax),pmax,num.eq=FALSE),
+ graph=identical(unname(result$adjacency),graph),
+ sepsets=identical(canonical_deletion_sepsets(t,'native_edge_deleted'),canonical_deletion_sepsets(rt,'native_edge_deleted')),
+ counts=identical(as.integer(result$n.edgetests),as.integer(reference$result$n.edgetests[1:5])),
+ rng=identical(seed,.Random.seed),resources=all(unlist(after[live])==0)&&all(unlist(before[live])==0),
+ fixtures=all(file.exists(fixtures)),native=sha(native)==build$native_sha256,
+ source=all(vapply(names(build$source_closure),sha,'')==unlist(build$source_closure)),
+ l4_coverage=nrow(b)==34L&&sum(b$optimizer_setup_count)==2154L&&sum(b$target_optimization_count)==17767L,
+ windows=identical(s$prefill_batches[identity],rb[identity]),
+ cpu_authority_fallback_zero=all(vapply(authority,function(k)!is.null(s[[k]])&&s[[k]]==0,logical(1))))
+receipt<-list(schema='optimizer-l4-capture-v1',result=result,gates=gates,
+ native_sha256=sha(native),reference_sha256=sha(reference_path),dataset_sha256=sha(dataset),
+ fixture_sha256=as.list(setNames(vapply(fixtures,sha,''),basename(fixtures))),
+ seed_before=seed,seed_after=.Random.seed,resources_before=before,resources_after=after,
+ evidence_class='GPU1 shared-host captured prefix; shadow diagnostic-only; no performance claim')
+saveRDS(receipt,file.path(out,'capture.rds'),compress=FALSE)
+jsonlite::write_json(c(receipt[c('schema','gates','native_sha256','reference_sha256','dataset_sha256','fixture_sha256','evidence_class')],
+ list(ci_count=nrow(t),l4_windows=nrow(b),l4_setups=sum(b$optimizer_setup_count),l4_targets=sum(b$target_optimization_count),
+ runner_sha256=sha('fastkpc/tools/research/optimizer_l4_diagnostic_20261023/capture.R'),
+ receipt_sha256=sha(file.path(out,'capture.rds')))),
+ file.path(out,'capture.json'),pretty=TRUE,auto_unbox=TRUE)
+print(gates);stopifnot(all(unlist(gates)));cat('PASS captured canonical prefix',nrow(t),'CI\n')
