@@ -1121,20 +1121,20 @@ class ExactPrimaryCoefficientArena {
 
   bool enabled() const { return enabled_; }
 
-  // Called on the owning host thread before L5 workers start. No storage may
+  // Called on the owning host thread before slot workers start. No storage may
   // grow while they detach coefficients into this arena.
   void reserve_slot_layer(int level, int q, std::size_t targets) {
     require(enabled_ && current_level_ == level && coefficient_size_values_ == 0U,
-            "L5 coefficient reservation requires an empty active level");
+            "slot coefficient reservation requires an empty active level");
     select_device();
     ensure_coefficient_storage(checked_coefficient_values(q, targets));
   }
 
-  // enqueue_store and this record are serialized by the L5 caller's mutex.
+  // enqueue_store and this record are serialized by the slot caller's mutex.
   // Each worker then waits on its own precreated blocking event before reuse.
   void record_slot_store(cudaEvent_t event) {
-    require(enabled_ && event != nullptr, "L5 coefficient detach event is missing");
-    check_one_call_cuda(cudaEventRecord(event, stream_), "record L5 coefficient detach");
+    require(enabled_ && event != nullptr, "slot coefficient detach event is missing");
+    check_one_call_cuda(cudaEventRecord(event, stream_), "record slot coefficient detach");
   }
 
   void begin_level(int level) {
@@ -1529,17 +1529,18 @@ struct LevelComponentConsumerDiagnostic {
   double residual_host_ms = 0.0, full_eig_cuda_ms = 0.0, dcov_host_ms = 0.0;
 };
 
-struct L5OptimizerSlotDiagnostics {
+struct OptimizerSlotDiagnostics {
   bool enabled = false;
   int layers = 0, setups = 0, targets = 0, created = 0, destroyed = 0;
   int optimizer_binds = 0, stage_a_binds = 0, detached = 0, peak_workers = 0;
   std::size_t free_before = 0, free_after = 0;
+  std::size_t minimum_free = 0, maximum_pool_increment = 0;
   double prepare_ms = 0.0, work_ms = 0.0, destroy_ms = 0.0;
   double bind_sum_ms = 0.0, detach_sum_ms = 0.0, stage_a_bind_ms = 0.0;
 };
 
 struct OneCallDiagnostics {
-  L5OptimizerSlotDiagnostics l5_slots;
+  OptimizerSlotDiagnostics l4_slots, l5_slots;
   bool l4_optimizer_workers32_enabled = false;
   bool level_component_prefill_enabled = false;
   bool structured_component_prefill_enabled = false;
@@ -4990,107 +4991,169 @@ struct MultiPenaltyPrefillWindowWork {
   bool coefficients_already_detached = false;
 };
 
-MultiPenaltyGcvL5Geometry pack_l5_slot_geometry(
+// Only the two independently qualified envelopes use reusable optimizer slots.
+struct L4OptimizerSlotPolicy {
+  using Geometry = MultiPenaltyGcvL4Geometry;
+  static constexpr int level = 4, q = 37, penalties = 4;
+  static void validate(const Geometry& g) { validate_multi_penalty_gcv_l4_geometry(g); }
+  static bool cohort(int count) {
+    switch (count) {
+      case 2: case 3: case 4: case 5: case 6: case 7: case 8:
+      case 10: case 11: case 12: case 14: case 16: case 17: case 18: return true;
+      default: return false;
+    }
+  }
+  static auto create(const Geometry& g, int device) { return create_multi_penalty_gcv_capacity_l4_slot(g, device); }
+  static void bind(const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& p, const Geometry& g) {
+    rebind_multi_penalty_gcv_capacity_l4_slot(p, g);
+  }
+  static void drain(const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& p) {
+    drain_multi_penalty_gcv_capacity_l4_slot(p);
+  }
+};
+struct L5OptimizerSlotPolicy {
+  using Geometry = MultiPenaltyGcvL5Geometry;
+  static constexpr int level = 5, q = 46, penalties = 5;
+  static void validate(const Geometry& g) { validate_multi_penalty_gcv_l5_geometry(g); }
+  static bool cohort(int count) { return count == 2 || count == 3 || count == 4 || count == 8; }
+  static auto create(const Geometry& g, int device) { return create_multi_penalty_gcv_capacity_l5_slot(g, device); }
+  static void bind(const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& p, const Geometry& g) {
+    rebind_multi_penalty_gcv_capacity_l5_slot(p, g);
+  }
+  static void drain(const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& p) {
+    drain_multi_penalty_gcv_capacity_l5_slot(p);
+  }
+};
+
+template<class Policy>
+typename Policy::Geometry pack_optimizer_slot_geometry(
     const std::shared_ptr<NativeSetupContext>& context) {
-  require(context && context->n == 351 && context->coefficient_dim == 46 &&
-            context->penalty_count == 5 && !context->multi_penalty,
-          "L5 slot request has an unqualified shape or retained handle");
-  MultiPenaltyGcvL5Geometry g;
-  g.X = copy_numeric_matrix(context->setup["X"], 351, 46, "L5 X");
-  g.qr = copy_numeric_matrix(context->geometry["magic_qr_packed"], 351, 46, "L5 QR");
-  g.tau = copy_numeric_vector(context->geometry["magic_tau"], 46, "L5 tau");
-  g.r = copy_numeric_matrix(context->geometry["magic_r"], 46, 46, "L5 R");
-  g.initial_log_sp = copy_numeric_vector(context->geometry["initial_log_sp"], 5, "L5 initial SP");
+  require(context && context->n == 351 && context->coefficient_dim == Policy::q &&
+            context->penalty_count == Policy::penalties && !context->multi_penalty,
+          "optimizer slot slot request has an unqualified shape or retained handle");
+  typename Policy::Geometry g;
+  g.X = copy_numeric_matrix(context->setup["X"], 351, Policy::q, "optimizer slot X");
+  g.qr = copy_numeric_matrix(context->geometry["magic_qr_packed"], 351, Policy::q, "optimizer slot QR");
+  g.tau = copy_numeric_vector(context->geometry["magic_tau"], Policy::q, "optimizer slot tau");
+  g.r = copy_numeric_matrix(context->geometry["magic_r"], Policy::q, Policy::q, "optimizer slot R");
+  g.initial_log_sp = copy_numeric_vector(context->geometry["initial_log_sp"], Policy::penalties, "optimizer slot initial SP");
   Rcpp::IntegerVector pivot = context->geometry["magic_pivot"];
   Rcpp::IntegerVector ranks = context->setup["penalty_ranks"];
   for (int p : pivot) g.pivot.push_back(p - 1);
   g.ranks.assign(ranks.begin(), ranks.end());
-  const auto roots = numeric_matrix_list(context->geometry["penalty_roots"], 46, "L5 roots");
-  const auto matrices = numeric_matrix_list(context->geometry["penalty_matrices"], 46, "L5 matrices");
-  require(roots.size() == 5U && matrices.size() == 5U && g.ranks.size() == 5U,
-          "L5 penalty packet is malformed");
+  const auto roots = numeric_matrix_list(context->geometry["penalty_roots"], Policy::q, "optimizer slot roots");
+  const auto matrices = numeric_matrix_list(context->geometry["penalty_matrices"], Policy::q, "optimizer slot matrices");
+  require(roots.size() == Policy::penalties && matrices.size() == Policy::penalties && g.ranks.size() == Policy::penalties,
+          "optimizer slot penalty packet is malformed");
   int rank = 0;
-  for (int j = 0; j < 5; ++j) {
-    require(roots[j].size() == static_cast<std::size_t>(46 * g.ranks[j]) &&
-              matrices[j].size() == 46U * 46U, "L5 root or matrix shape changed");
+  for (int j = 0; j < Policy::penalties; ++j) {
+    require(roots[j].size() == static_cast<std::size_t>(Policy::q * g.ranks[j]) &&
+              matrices[j].size() == static_cast<std::size_t>(Policy::q * Policy::q), "optimizer slot root or matrix shape changed");
     g.offsets.push_back(rank);
     rank += g.ranks[j];
     g.roots.insert(g.roots.end(), roots[j].begin(), roots[j].end());
     g.matrices.insert(g.matrices.end(), matrices[j].begin(), matrices[j].end());
   }
-  validate_multi_penalty_gcv_l5_geometry(g);
+  Policy::validate(g);
   return g;
 }
 
-class L5OptimizerSlotPool {
+class OptimizerSlotStageA {
  public:
-  L5OptimizerSlotPool(const std::vector<MultiPenaltyGcvL5Geometry>& geometry,
-                      L5OptimizerSlotDiagnostics* diagnostics)
+  virtual ~OptimizerSlotStageA() = default;
+  virtual std::shared_ptr<MultiPenaltyGcvCapacityPrepared> stage_a(std::size_t request) = 0;
+};
+
+template<class Policy>
+class OptimizerSlotPool : public OptimizerSlotStageA {
+ public:
+  OptimizerSlotPool(const std::vector<typename Policy::Geometry>& geometry,
+                    OptimizerSlotDiagnostics* diagnostics)
       : geometry_(geometry), diagnostics_(diagnostics) {
-    require(!geometry.empty() && diagnostics, "L5 slot pool has no geometry");
+    require(!geometry.empty() && diagnostics, "optimizer slot pool has no geometry");
     const auto largest = std::max_element(geometry.begin(), geometry.end(),
       [](const auto& a, const auto& b) { return a.roots.size() < b.roots.size(); });
-    check_one_call_cuda(cudaGetDevice(&device_), "capture L5 pool device");
+    check_one_call_cuda(cudaGetDevice(&device_), "capture optimizer slot pool device");
     std::size_t total = 0;
-    check_one_call_cuda(cudaMemGetInfo(&diagnostics_->free_before, &total), "L5 memory before create");
+    check_one_call_cuda(cudaMemGetInfo(&diagnostics_->free_before, &total), "optimizer slot memory before create");
     try {
       for (int i = 0; i < std::min<int>(32, geometry.size()); ++i) {
-        slots_.push_back(create_multi_penalty_gcv_capacity_l5_slot(*largest, device_));
+        slots_.push_back(Policy::create(*largest, device_));
         ++diagnostics_->created;
         events_.push_back(nullptr);
         check_one_call_cuda(cudaEventCreateWithFlags(&events_.back(),
-          cudaEventDisableTiming | cudaEventBlockingSync), "create L5 detach event");
+          cudaEventDisableTiming | cudaEventBlockingSync), "create optimizer slot detach event");
       }
-      check_one_call_cuda(cudaMemGetInfo(&diagnostics_->free_after, &total), "L5 memory after create");
+      check_one_call_cuda(cudaMemGetInfo(&diagnostics_->free_after, &total), "optimizer slot memory after create");
       require(diagnostics_->free_after >= 2ULL * 1024 * 1024 * 1024,
-              "L5 pool and production cache have less than 2 GiB headroom");
+              "optimizer slot pool and production cache have less than 2 GiB headroom");
+      observe_capacity(true);
     } catch (...) { close_noexcept(); throw; }
   }
-  ~L5OptimizerSlotPool() { close_noexcept(); }
-  L5OptimizerSlotPool(const L5OptimizerSlotPool&) = delete;
-  L5OptimizerSlotPool& operator=(const L5OptimizerSlotPool&) = delete;
+  ~OptimizerSlotPool() { close_noexcept(); }
+  OptimizerSlotPool(const OptimizerSlotPool&) = delete;
+  OptimizerSlotPool& operator=(const OptimizerSlotPool&) = delete;
   int size() const { return static_cast<int>(slots_.size()); }
   const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& slot(int i) const { return slots_.at(i); }
   cudaEvent_t event(int i) const { return events_.at(i); }
   void bind(int slot_index, std::size_t request) {
-    rebind_multi_penalty_gcv_capacity_l5_slot(slots_.at(slot_index), geometry_.at(request));
+    Policy::bind(slots_.at(slot_index), geometry_.at(request));
   }
-  std::shared_ptr<MultiPenaltyGcvCapacityPrepared> stage_a(std::size_t request) {
+  std::shared_ptr<MultiPenaltyGcvCapacityPrepared> stage_a(std::size_t request) override {
+    observe_capacity(false);
     const auto started = std::chrono::steady_clock::now();
     bind(0, request);
     ++diagnostics_->stage_a_binds;
     diagnostics_->stage_a_bind_ms += elapsed_ms(started);
     return slots_.front();
   }
+  void after_work() { observe_capacity(true); }
   void close() {
+    observe_capacity(false);
     const auto started = std::chrono::steady_clock::now();
-    check_one_call_cuda(cudaSetDevice(device_), "select L5 pool close device");
+    check_one_call_cuda(cudaSetDevice(device_), "select optimizer slot pool close device");
     for (auto& slot : slots_) {
       if (!slot) continue;
-      drain_multi_penalty_gcv_capacity_l5_slot(slot);
+      Policy::drain(slot);
       require(!multi_penalty_gcv_capacity_prepared_info(slot).residual_slot_leased,
-              "L5 pool closed with a live output lease");
+              "optimizer slot pool closed with a live output lease");
       slot.reset();
       ++diagnostics_->destroyed;
     }
     for (auto& event : events_) if (event) {
-      check_one_call_cuda(cudaEventDestroy(event), "destroy L5 detach event");
+      check_one_call_cuda(cudaEventDestroy(event), "destroy optimizer slot detach event");
       event = nullptr;
     }
     diagnostics_->destroy_ms += elapsed_ms(started);
   }
  private:
+  void observe_capacity(bool pool_increment) {
+    if constexpr (Policy::level == 4) {
+      std::size_t free = 0, total = 0;
+      check_one_call_cuda(cudaMemGetInfo(&free, &total), "L4 slot joint memory");
+      diagnostics_->minimum_free = diagnostics_->minimum_free ?
+        std::min(diagnostics_->minimum_free, free) : free;
+      if (pool_increment) {
+        diagnostics_->maximum_pool_increment = std::max(
+          diagnostics_->maximum_pool_increment,
+          diagnostics_->free_before > free ? diagnostics_->free_before - free : std::size_t(0));
+      }
+      require(free >= 2ULL * 1024 * 1024 * 1024 &&
+                diagnostics_->maximum_pool_increment <= 1024ULL * 1024 * 1024,
+              "L4 slots exceeded the qualified memory budget");
+    }
+  }
   void close_noexcept() noexcept {
     cudaSetDevice(device_);
     for (auto& slot : slots_) if (slot) {
-      try { drain_multi_penalty_gcv_capacity_l5_slot(slot); } catch (...) {}
+      try { Policy::drain(slot); } catch (...) {}
       slot.reset();
       ++diagnostics_->destroyed;
     }
     for (auto& event : events_) if (event) { cudaEventDestroy(event); event = nullptr; }
   }
-  const std::vector<MultiPenaltyGcvL5Geometry>& geometry_;
-  L5OptimizerSlotDiagnostics* diagnostics_;
+  const std::vector<typename Policy::Geometry>& geometry_;
+  OptimizerSlotDiagnostics* diagnostics_;
   int device_ = -1;
   std::vector<std::shared_ptr<MultiPenaltyGcvCapacityPrepared>> slots_;
   std::vector<cudaEvent_t> events_;
@@ -5285,7 +5348,7 @@ void complete_multi_penalty_prefill_window(
     MultiPenaltyGcvCapacityMultiResult optimization,
     ExactPrimaryCoefficientArena* coefficient_arena,
     OneCallDiagnostics* diagnostics,
-    L5OptimizerSlotPool* slots = nullptr) {
+    OptimizerSlotStageA* slots = nullptr) {
   require(work != nullptr && diagnostics != nullptr &&
             !work->metadata.empty(),
           "multi-penalty prefill completion state is malformed");
@@ -5396,7 +5459,7 @@ void complete_multi_penalty_prefill_window(
       if (coefficient_arena != nullptr && coefficient_arena->enabled()) {
         if (work->coefficients_already_detached) {
           require(slots && coefficient_arena->contains_all(work->batch.level, exact_residual_keys),
-                  "L5 detached coefficient identity failed closed");
+                  "slot detached coefficient identity failed closed");
         } else {
           coefficient_arena->enqueue_store(
             work->batch.level, request.base_target_keys, exact_residual_keys,
@@ -5532,44 +5595,44 @@ struct PendingMultiPenaltyPrefillWindow {
   std::future<MultiPenaltyGcvCapacityMultiResult> optimization;
 };
 
-void prefill_l5_slot_target_states(
+template<class Policy>
+void prefill_optimizer_slot_target_states(
     const Rcpp::NumericMatrix& data, const LayerPlan& plan,
     const std::vector<SinglePenaltyPrefillGroup>& groups,
     ExactPrimaryCoefficientArena* arena, OneCallDiagnostics* diagnostics) {
-  require(plan.level == 5 && arena && arena->enabled() && diagnostics->l5_slots.enabled,
-          "L5 slot prefill configuration changed");
+  auto& d = Policy::level == 4 ? diagnostics->l4_slots : diagnostics->l5_slots;
+  require(plan.level == Policy::level && arena && arena->enabled() && d.enabled,
+          "optimizer slot prefill configuration changed");
   PrefillBatchDiagnostic batch;
-  batch.level = 5;
+  batch.level = Policy::level;
   batch.penalty_class = "multi";
   batch.window_id = 1;  // One real whole-layer optimizer boundary, no fictitious windows.
   batch.conditioning_group_count = static_cast<int>(groups.size());
   auto work = prepare_multi_penalty_prefill_window(data, plan, groups, std::move(batch), diagnostics, true);
   if (work.requests.empty()) return;
-  auto& d = diagnostics->l5_slots;
-  std::vector<MultiPenaltyGcvL5Geometry> geometry;
+  std::vector<typename Policy::Geometry> geometry;
   geometry.reserve(work.metadata.size());
   std::size_t targets = 0;
   for (std::size_t i = 0; i < work.requests.size(); ++i) {
     auto& request = work.requests[i];
-    require(request.target_count == 2 || request.target_count == 3 ||
-              request.target_count == 4 || request.target_count == 8,
-            "L5 slot target cohort is outside the qualified 2/3/4/8 envelope");
+    require(Policy::cohort(request.target_count),
+            "optimizer slot target cohort is outside the qualified envelope");
     require(request.control.exact_primary_only &&
               request.control.decomposition_trace_capacity_per_target == 0,
-            "L5 slot optimizer control is outside the qualified envelope");
+            "optimizer slot control is outside the qualified envelope");
     request.control.force_final_selected_evaluation = true;
     targets += request.target_count;
-    geometry.push_back(pack_l5_slot_geometry(work.metadata[i].context));
+    geometry.push_back(pack_optimizer_slot_geometry<Policy>(work.metadata[i].context));
   }
-  arena->reserve_slot_layer(5, 46, targets);
-  L5OptimizerSlotPool pool(geometry, &d);
+  arena->reserve_slot_layer(Policy::level, Policy::q, targets);
+  OptimizerSlotPool<Policy> pool(geometry, &d);
   d.prepare_ms = elapsed_ms(work.started);
   work.preparation_ms = d.prepare_ms;
   MultiPenaltyGcvCapacityMultiResult optimization;
   optimization.setups.resize(work.requests.size());
   auto& md = optimization.diagnostics;
-  md.schema_version = "full-cuda-ci-l5-slot-optimizer-v1";
-  md.execution_strategy = "original-order-l5-32-reusable-slots";
+  md.schema_version = Policy::level == 4 ? "full-cuda-ci-l4-slot-optimizer-v1" : "full-cuda-ci-l5-slot-optimizer-v1";
+  md.execution_strategy = Policy::level == 4 ? "original-order-l4-32-reusable-slots" : "original-order-l5-32-reusable-slots";
   md.setup_count = static_cast<int>(work.requests.size());
   md.target_count = static_cast<int>(targets);
   md.requested_concurrency = md.worker_count = md.setup_stream_count = pool.size();
@@ -5599,19 +5662,19 @@ void prefill_l5_slot_target_states(
           request.target_keys, request.control);
         pending = std::move(result.residual);
         const auto& values = result.optimization.selected_log_sp;
-        require(values.size() == static_cast<std::size_t>(5 * request.target_count),
-                "L5 optimizer selected-SP size changed");
+        require(values.size() == static_cast<std::size_t>(Policy::penalties * request.target_count),
+                "optimizer slot selected-SP size changed");
         std::vector<std::string> keys;
         for (int j = 0; j < request.target_count; ++j) {
-          keys.push_back(exact_fixed_residual_key(request.target_keys[j], values.data() + 5 * j, 5));
+          keys.push_back(exact_fixed_residual_key(request.target_keys[j], values.data() + Policy::penalties * j, Policy::penalties));
         }
         at = std::chrono::steady_clock::now();
         {
           std::lock_guard<std::mutex> lock(detach_mutex);
-          arena->enqueue_store(5, request.target_keys, keys, pending);
+          arena->enqueue_store(Policy::level, request.target_keys, keys, pending);
           arena->record_slot_store(pool.event(slot));
         }
-        check_one_call_cuda(cudaEventSynchronize(pool.event(slot)), "wait for L5 coefficient detach");
+        check_one_call_cuda(cudaEventSynchronize(pool.event(slot)), "wait for optimizer slot coefficient detach");
         release_multi_penalty_gcv_capacity_residual(pending);
         pending.reset();
         detach_ms[i] = elapsed_ms(at);
@@ -5623,7 +5686,7 @@ void prefill_l5_slot_target_states(
       { std::lock_guard<std::mutex> lock(error_mutex); if (!error) error = std::current_exception(); }
       // Do not release an output lease until all consumers of it have drained.
       arena->synchronize_noexcept();
-      try { drain_multi_penalty_gcv_capacity_l5_slot(pool.slot(slot)); } catch (...) {}
+      try { Policy::drain(pool.slot(slot)); } catch (...) {}
       if (pending) { try { release_multi_penalty_gcv_capacity_residual(pending); } catch (...) {} }
     }
   };
@@ -5638,6 +5701,7 @@ void prefill_l5_slot_target_states(
   for (auto& thread : workers) thread.join();
   if (error) { arena->synchronize_noexcept(); std::rethrow_exception(error); }
   md.wall_host_ms = d.work_ms = elapsed_ms(started);
+  pool.after_work();
   md.max_host_calls_in_flight = d.peak_workers = peak.load();
   for (const auto& result : optimization.setups) md.summed_setup_host_ms += result.diagnostics.total_host_ms;
   md.host_overlap_factor = md.summed_setup_host_ms / md.wall_host_ms;
@@ -5674,13 +5738,18 @@ void prefill_multi_penalty_level_target_states(
   std::vector<SinglePenaltyPrefillGroup> window;
   window.reserve(
     static_cast<std::size_t>(kMultiPenaltyGcvMaximumConcurrentSetups));
-  if (diagnostics->l5_slots.enabled && plan.level == 5) {
+  if ((diagnostics->l4_slots.enabled && plan.level == 4) ||
+      (diagnostics->l5_slots.enabled && plan.level == 5)) {
     for (const auto& entry : tasks_by_conditioning) {
-      require(!entry.second.empty(), "L5 slot conditioning group is empty");
+      require(!entry.second.empty(), "slot conditioning group is empty");
       const auto& task = plan.tasks[static_cast<std::size_t>(entry.second.front())];
       window.push_back(SinglePenaltyPrefillGroup{setup_cache->get(task.conditioning_set), entry.second});
     }
-    prefill_l5_slot_target_states(data, plan, window, coefficient_arena, diagnostics);
+    if (plan.level == 4) {
+      prefill_optimizer_slot_target_states<L4OptimizerSlotPolicy>(data, plan, window, coefficient_arena, diagnostics);
+    } else {
+      prefill_optimizer_slot_target_states<L5OptimizerSlotPolicy>(data, plan, window, coefficient_arena, diagnostics);
+    }
     return;
   }
   std::size_t window_capacity =
@@ -7043,6 +7112,16 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
   diagnostics.l5_slots.enabled = level_component_flag("FASTKPC_DCC_GAMMA_L5_OPTIMIZER_SLOTS");
   diagnostics.l4_optimizer_workers32_enabled =
     level_component_flag("FASTKPC_DCC_GAMMA_L4_OPTIMIZER_WORKERS32");
+  diagnostics.l4_slots.enabled = level_component_flag("FASTKPC_DCC_GAMMA_L4_OPTIMIZER_SLOTS");
+  require(!diagnostics.l4_slots.enabled ||
+            (method_options.ci_method == "dcc.gamma" && n == 351 && p == 48 &&
+             diagnostics.l4_optimizer_workers32_enabled &&
+             diagnostics.l2_component_prefill_enabled &&
+             diagnostics.exact_primary_fixed_reuse_requested &&
+             !diagnostics.setup_optimizer_pipeline_enabled &&
+             diagnostics.cuda_multi_penalty_decomposition_trace_capacity_per_target == 0 &&
+             level_component_flag("FASTKPC_MULTI_PENALTY_STATUS_WAIT_BEFORE_D2H")),
+          "L4 optimizer slots require canonical S2, workers32, exact-primary reuse, status wait and original setup scheduling");
   require(!diagnostics.l4_optimizer_workers32_enabled ||
             (method_options.ci_method == "dcc.gamma" && n == 351 && p == 48 &&
              diagnostics.l2_component_prefill_enabled &&
@@ -8493,6 +8572,11 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
 
   const DecompositionReuseAggregate& decomposition_reuse =
     diagnostics.cuda_multi_penalty_decomposition_reuse;
+  require(diagnostics.l4_slots.created == diagnostics.l4_slots.destroyed &&
+            diagnostics.l4_slots.optimizer_binds == diagnostics.l4_slots.detached &&
+            diagnostics.l4_slots.stage_a_binds == diagnostics.l4_slots.detached &&
+            (diagnostics.l4_slots.enabled || diagnostics.l4_slots.created == 0),
+          "L4 optimizer slot lifecycle failed closed");
   require(diagnostics.l5_slots.created == diagnostics.l5_slots.destroyed &&
             diagnostics.l5_slots.optimizer_binds == diagnostics.l5_slots.detached &&
             diagnostics.l5_slots.stage_a_binds == diagnostics.l5_slots.detached &&
@@ -8698,6 +8782,27 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
       exact_primary_fixed_reuse_key_trace,
     Rcpp::Named("summary") = Rcpp::List::create(
       Rcpp::Named("l4_optimizer_workers32_enabled") = diagnostics.l4_optimizer_workers32_enabled,
+      Rcpp::Named("l4_optimizer_slots") = Rcpp::List::create(
+        Rcpp::Named("enabled") = diagnostics.l4_slots.enabled,
+        Rcpp::Named("layers") = diagnostics.l4_slots.layers,
+        Rcpp::Named("setups") = diagnostics.l4_slots.setups,
+        Rcpp::Named("targets") = diagnostics.l4_slots.targets,
+        Rcpp::Named("created") = diagnostics.l4_slots.created,
+        Rcpp::Named("destroyed") = diagnostics.l4_slots.destroyed,
+        Rcpp::Named("optimizer_binds") = diagnostics.l4_slots.optimizer_binds,
+        Rcpp::Named("stage_a_binds") = diagnostics.l4_slots.stage_a_binds,
+        Rcpp::Named("detached") = diagnostics.l4_slots.detached,
+        Rcpp::Named("peak_workers") = diagnostics.l4_slots.peak_workers,
+        Rcpp::Named("free_before_create") = static_cast<double>(diagnostics.l4_slots.free_before),
+        Rcpp::Named("free_after_create") = static_cast<double>(diagnostics.l4_slots.free_after),
+        Rcpp::Named("minimum_free_bytes") = static_cast<double>(diagnostics.l4_slots.minimum_free),
+        Rcpp::Named("maximum_pool_increment_bytes") = static_cast<double>(diagnostics.l4_slots.maximum_pool_increment),
+        Rcpp::Named("prepare_ms") = diagnostics.l4_slots.prepare_ms,
+        Rcpp::Named("work_ms") = diagnostics.l4_slots.work_ms,
+        Rcpp::Named("destroy_ms") = diagnostics.l4_slots.destroy_ms,
+        Rcpp::Named("bind_sum_ms") = diagnostics.l4_slots.bind_sum_ms,
+        Rcpp::Named("detach_sum_ms") = diagnostics.l4_slots.detach_sum_ms,
+        Rcpp::Named("stage_a_bind_ms") = diagnostics.l4_slots.stage_a_bind_ms),
       Rcpp::Named("l5_optimizer_slots") = Rcpp::List::create(
         Rcpp::Named("enabled") = diagnostics.l5_slots.enabled,
         Rcpp::Named("layers") = diagnostics.l5_slots.layers,

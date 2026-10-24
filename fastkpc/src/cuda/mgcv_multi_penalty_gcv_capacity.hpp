@@ -3,6 +3,7 @@
 
 #include "mgcv_multi_penalty_gcv.hpp"
 #include "mgcv_multi_penalty_gcv_l5.hpp"
+#include "mgcv_multi_penalty_gcv_l4.hpp"
 
 #include <memory>
 #include <string>
@@ -30,6 +31,17 @@ void rebind_multi_penalty_gcv_capacity_l5_slot(
     const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& prepared,
     const MultiPenaltyGcvL5Geometry& geometry);
 void drain_multi_penalty_gcv_capacity_l5_slot(
+    const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& prepared);
+
+// Default-off L4 experiment: capacity eighteen, original unpadded target counts.
+// Drain and discard after any failed rebind. Never reuse partially uploaded geometry.
+std::shared_ptr<MultiPenaltyGcvCapacityPrepared>
+create_multi_penalty_gcv_capacity_l4_slot(
+    const MultiPenaltyGcvL4Geometry& geometry, int device_id);
+void rebind_multi_penalty_gcv_capacity_l4_slot(
+    const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& prepared,
+    const MultiPenaltyGcvL4Geometry& geometry);
+void drain_multi_penalty_gcv_capacity_l4_slot(
     const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& prepared);
 
 struct MultiPenaltyGcvCapacityRequest {
