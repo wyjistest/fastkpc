@@ -1,5 +1,11 @@
 # Phase 10 开发交接：optimizer status wait、L5 slots 与 L4 worker cap
 
+后续进展：L4 有界槽位的 runtime 与工具现已分别提交为 `4a1ff6b` / `1c27d6f`。
+[后续 runtime 报告](PHASE10_OPTIMIZER_L4_SLOT_RUNTIME_20261024.md)记录隔离 OFF/ON
+中位数 **463.288/407.531 秒**及完整硬门；[新的 Git attestation](PHASE10_L4_SLOT_SOURCE_ATTESTATION_20261024.json)
+绑定 99 个源码输入与 44 项工具记录。下文及原 attestation 保留先前交接的历史身份，
+其 461.663 秒不是新 campaign 的 OFF 对照。新增选项仍默认关闭，Phase 10 状态不变。
+
 日期：2026-10-24。本次收口覆盖已完成的 D2H 等待归因、status-wait 资格、
 L5 全层补位与有界槽位实验、L5 opt-in runtime，以及 L4 容量诊断和原窗口 runtime。
 
