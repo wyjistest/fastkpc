@@ -76,6 +76,17 @@ bool exact_primary_test_override() {
     "FASTKPC_TEST_MULTI_PENALTY_EXACT_ONLY must be 0, 1, or exact-primary");
 }
 
+bool optimizer_status_wait_enabled() {
+  const char* raw = std::getenv(
+    "FASTKPC_MULTI_PENALTY_STATUS_WAIT_BEFORE_D2H");
+  if (raw == nullptr || raw[0] == '\0' || std::strcmp(raw, "0") == 0) {
+    return false;
+  }
+  if (std::strcmp(raw, "1") == 0) return true;
+  throw std::runtime_error(
+    "FASTKPC_MULTI_PENALTY_STATUS_WAIT_BEFORE_D2H must be 0 or 1");
+}
+
 enum DeviceDecompositionTraceFlag : unsigned int {
   kDecompositionTraceInitial = 1U << 0,
   kDecompositionTraceNewtonTrial = 1U << 1,
@@ -191,10 +202,12 @@ class Stream {
 
 class Event {
  public:
-  Event() {
-    check_cuda(cudaEventCreateWithFlags(
-      &event_, cudaEventDisableTiming),
-      "create multi-penalty GCV completion event");
+  explicit Event(unsigned int flags = cudaEventDisableTiming,
+                 bool enabled = true) {
+    if (enabled) {
+      check_cuda(cudaEventCreateWithFlags(&event_, flags),
+                 "create multi-penalty GCV event");
+    }
   }
   Event(const Event&) = delete;
   Event& operator=(const Event&) = delete;
@@ -3359,7 +3372,10 @@ __global__ void gather_multi_penalty_fixed_evaluation_kernel(
 
 class MultiPenaltyGcvCudaPrepared {
  public:
-  MultiPenaltyGcvCudaPrepared() : cublas(stream.get()) {}
+  MultiPenaltyGcvCudaPrepared()
+      : cublas(stream.get()),
+        status_wait_event(cudaEventDisableTiming | cudaEventBlockingSync,
+                          optimizer_status_wait_enabled()) {}
   ~MultiPenaltyGcvCudaPrepared() {
     if (device_id >= 0) cudaSetDevice(device_id);
   }
@@ -3374,6 +3390,9 @@ class MultiPenaltyGcvCudaPrepared {
   Stream stream;
   CublasHandle cublas;
   Event completion_event;
+  // Separate from the downstream producer event. Created on this prepared
+  // object's device, never allocated in an optimizer worker or shared via TLS.
+  Event status_wait_event;
   DeviceBuffer<unsigned char> d_arena;
   DeviceBuffer<double> d_X;
   DeviceBuffer<double> d_qr_packed;
@@ -5865,6 +5884,16 @@ MultiPenaltyGcvCudaBatchResult multi_penalty_gcv_cuda_optimize_batch(
     check_cuda(cudaEventRecord(
       prepared->completion_event.get(), prepared->stream.get()),
       "record persistent multi-penalty residual completion");
+    if (prepared->status_wait_event.get() != nullptr) {
+      // A pageable D2H can serialize other workers while waiting for this
+      // stream's kernels. Sleep on our own completion before entering that
+      // path. The original download and post-download synchronization remain.
+      check_cuda(cudaEventRecord(
+        prepared->status_wait_event.get(), prepared->stream.get()),
+        "record persistent multi-penalty status wait");
+      check_cuda(cudaEventSynchronize(prepared->status_wait_event.get()),
+        "wait before persistent multi-penalty status download");
+    }
     check_cuda(cudaMemcpyAsync(
       prepared->host_states.data(), prepared->d_states.get(),
       static_cast<std::size_t>(target_count) *

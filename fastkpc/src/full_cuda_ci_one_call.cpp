@@ -974,6 +974,9 @@ struct PrefillBatchDiagnostic {
   int target_optimization_count = 0;
   int singleton_skipped_request_count = 0;
   int singleton_skipped_target_count = 0;
+  int optimizer_requested_concurrency = 0;
+  int optimizer_worker_count = 0;
+  int optimizer_peak_host_calls = 0;
   double optimizer_host_ms = 0.0;
   double batch_wall_ms = 0.0;
   std::vector<std::string> optimized_target_keys;
@@ -1117,6 +1120,22 @@ class ExactPrimaryCoefficientArena {
       const ExactPrimaryCoefficientArena&) = delete;
 
   bool enabled() const { return enabled_; }
+
+  // Called on the owning host thread before L5 workers start. No storage may
+  // grow while they detach coefficients into this arena.
+  void reserve_slot_layer(int level, int q, std::size_t targets) {
+    require(enabled_ && current_level_ == level && coefficient_size_values_ == 0U,
+            "L5 coefficient reservation requires an empty active level");
+    select_device();
+    ensure_coefficient_storage(checked_coefficient_values(q, targets));
+  }
+
+  // enqueue_store and this record are serialized by the L5 caller's mutex.
+  // Each worker then waits on its own precreated blocking event before reuse.
+  void record_slot_store(cudaEvent_t event) {
+    require(enabled_ && event != nullptr, "L5 coefficient detach event is missing");
+    check_one_call_cuda(cudaEventRecord(event, stream_), "record L5 coefficient detach");
+  }
 
   void begin_level(int level) {
     if (!enabled_) return;
@@ -1510,7 +1529,18 @@ struct LevelComponentConsumerDiagnostic {
   double residual_host_ms = 0.0, full_eig_cuda_ms = 0.0, dcov_host_ms = 0.0;
 };
 
+struct L5OptimizerSlotDiagnostics {
+  bool enabled = false;
+  int layers = 0, setups = 0, targets = 0, created = 0, destroyed = 0;
+  int optimizer_binds = 0, stage_a_binds = 0, detached = 0, peak_workers = 0;
+  std::size_t free_before = 0, free_after = 0;
+  double prepare_ms = 0.0, work_ms = 0.0, destroy_ms = 0.0;
+  double bind_sum_ms = 0.0, detach_sum_ms = 0.0, stage_a_bind_ms = 0.0;
+};
+
 struct OneCallDiagnostics {
+  L5OptimizerSlotDiagnostics l5_slots;
+  bool l4_optimizer_workers32_enabled = false;
   bool level_component_prefill_enabled = false;
   bool structured_component_prefill_enabled = false;
   bool l2_component_prefill_enabled = false;
@@ -4448,7 +4478,8 @@ Rcpp::DataFrame prefill_batch_diagnostics_frame(
   Rcpp::IntegerVector level(count), window_id(count), conditioning_groups(count),
     optimizer_setups(count), target_optimizations(count), unique_targets(count),
     consumed_targets(count), unconsumed_targets(count),
-    singleton_skipped_requests(count), singleton_skipped_targets(count);
+    singleton_skipped_requests(count), singleton_skipped_targets(count),
+    requested_concurrency(count), worker_count(count), peak_host_calls(count);
   Rcpp::CharacterVector penalty_class(count);
   Rcpp::NumericVector optimizer_host_ms(count), batch_wall_ms(count);
   for (int index = 0; index < count; ++index) {
@@ -4474,6 +4505,9 @@ Rcpp::DataFrame prefill_batch_diagnostics_frame(
     singleton_skipped_requests[index] =
       batch.singleton_skipped_request_count;
     singleton_skipped_targets[index] = batch.singleton_skipped_target_count;
+    requested_concurrency[index] = batch.optimizer_requested_concurrency;
+    worker_count[index] = batch.optimizer_worker_count;
+    peak_host_calls[index] = batch.optimizer_peak_host_calls;
     optimizer_host_ms[index] = batch.optimizer_host_ms;
     batch_wall_ms[index] = batch.batch_wall_ms;
   }
@@ -4490,6 +4524,9 @@ Rcpp::DataFrame prefill_batch_diagnostics_frame(
     Rcpp::Named("singleton_skipped_request_count") =
       singleton_skipped_requests,
     Rcpp::Named("singleton_skipped_target_count") = singleton_skipped_targets,
+    Rcpp::Named("optimizer_requested_concurrency") = requested_concurrency,
+    Rcpp::Named("optimizer_worker_count") = worker_count,
+    Rcpp::Named("optimizer_peak_host_calls") = peak_host_calls,
     Rcpp::Named("optimizer_host_ms") = optimizer_host_ms,
     Rcpp::Named("batch_wall_ms") = batch_wall_ms,
     Rcpp::Named("stringsAsFactors") = false);
@@ -4950,6 +4987,113 @@ struct MultiPenaltyPrefillWindowWork {
   std::vector<MultiPenaltyGcvCapacityRequest> requests;
   int maximum_concurrency = 0;
   double preparation_ms = 0.0;
+  bool coefficients_already_detached = false;
+};
+
+MultiPenaltyGcvL5Geometry pack_l5_slot_geometry(
+    const std::shared_ptr<NativeSetupContext>& context) {
+  require(context && context->n == 351 && context->coefficient_dim == 46 &&
+            context->penalty_count == 5 && !context->multi_penalty,
+          "L5 slot request has an unqualified shape or retained handle");
+  MultiPenaltyGcvL5Geometry g;
+  g.X = copy_numeric_matrix(context->setup["X"], 351, 46, "L5 X");
+  g.qr = copy_numeric_matrix(context->geometry["magic_qr_packed"], 351, 46, "L5 QR");
+  g.tau = copy_numeric_vector(context->geometry["magic_tau"], 46, "L5 tau");
+  g.r = copy_numeric_matrix(context->geometry["magic_r"], 46, 46, "L5 R");
+  g.initial_log_sp = copy_numeric_vector(context->geometry["initial_log_sp"], 5, "L5 initial SP");
+  Rcpp::IntegerVector pivot = context->geometry["magic_pivot"];
+  Rcpp::IntegerVector ranks = context->setup["penalty_ranks"];
+  for (int p : pivot) g.pivot.push_back(p - 1);
+  g.ranks.assign(ranks.begin(), ranks.end());
+  const auto roots = numeric_matrix_list(context->geometry["penalty_roots"], 46, "L5 roots");
+  const auto matrices = numeric_matrix_list(context->geometry["penalty_matrices"], 46, "L5 matrices");
+  require(roots.size() == 5U && matrices.size() == 5U && g.ranks.size() == 5U,
+          "L5 penalty packet is malformed");
+  int rank = 0;
+  for (int j = 0; j < 5; ++j) {
+    require(roots[j].size() == static_cast<std::size_t>(46 * g.ranks[j]) &&
+              matrices[j].size() == 46U * 46U, "L5 root or matrix shape changed");
+    g.offsets.push_back(rank);
+    rank += g.ranks[j];
+    g.roots.insert(g.roots.end(), roots[j].begin(), roots[j].end());
+    g.matrices.insert(g.matrices.end(), matrices[j].begin(), matrices[j].end());
+  }
+  validate_multi_penalty_gcv_l5_geometry(g);
+  return g;
+}
+
+class L5OptimizerSlotPool {
+ public:
+  L5OptimizerSlotPool(const std::vector<MultiPenaltyGcvL5Geometry>& geometry,
+                      L5OptimizerSlotDiagnostics* diagnostics)
+      : geometry_(geometry), diagnostics_(diagnostics) {
+    require(!geometry.empty() && diagnostics, "L5 slot pool has no geometry");
+    const auto largest = std::max_element(geometry.begin(), geometry.end(),
+      [](const auto& a, const auto& b) { return a.roots.size() < b.roots.size(); });
+    check_one_call_cuda(cudaGetDevice(&device_), "capture L5 pool device");
+    std::size_t total = 0;
+    check_one_call_cuda(cudaMemGetInfo(&diagnostics_->free_before, &total), "L5 memory before create");
+    try {
+      for (int i = 0; i < std::min<int>(32, geometry.size()); ++i) {
+        slots_.push_back(create_multi_penalty_gcv_capacity_l5_slot(*largest, device_));
+        ++diagnostics_->created;
+        events_.push_back(nullptr);
+        check_one_call_cuda(cudaEventCreateWithFlags(&events_.back(),
+          cudaEventDisableTiming | cudaEventBlockingSync), "create L5 detach event");
+      }
+      check_one_call_cuda(cudaMemGetInfo(&diagnostics_->free_after, &total), "L5 memory after create");
+      require(diagnostics_->free_after >= 2ULL * 1024 * 1024 * 1024,
+              "L5 pool and production cache have less than 2 GiB headroom");
+    } catch (...) { close_noexcept(); throw; }
+  }
+  ~L5OptimizerSlotPool() { close_noexcept(); }
+  L5OptimizerSlotPool(const L5OptimizerSlotPool&) = delete;
+  L5OptimizerSlotPool& operator=(const L5OptimizerSlotPool&) = delete;
+  int size() const { return static_cast<int>(slots_.size()); }
+  const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& slot(int i) const { return slots_.at(i); }
+  cudaEvent_t event(int i) const { return events_.at(i); }
+  void bind(int slot_index, std::size_t request) {
+    rebind_multi_penalty_gcv_capacity_l5_slot(slots_.at(slot_index), geometry_.at(request));
+  }
+  std::shared_ptr<MultiPenaltyGcvCapacityPrepared> stage_a(std::size_t request) {
+    const auto started = std::chrono::steady_clock::now();
+    bind(0, request);
+    ++diagnostics_->stage_a_binds;
+    diagnostics_->stage_a_bind_ms += elapsed_ms(started);
+    return slots_.front();
+  }
+  void close() {
+    const auto started = std::chrono::steady_clock::now();
+    check_one_call_cuda(cudaSetDevice(device_), "select L5 pool close device");
+    for (auto& slot : slots_) {
+      if (!slot) continue;
+      drain_multi_penalty_gcv_capacity_l5_slot(slot);
+      require(!multi_penalty_gcv_capacity_prepared_info(slot).residual_slot_leased,
+              "L5 pool closed with a live output lease");
+      slot.reset();
+      ++diagnostics_->destroyed;
+    }
+    for (auto& event : events_) if (event) {
+      check_one_call_cuda(cudaEventDestroy(event), "destroy L5 detach event");
+      event = nullptr;
+    }
+    diagnostics_->destroy_ms += elapsed_ms(started);
+  }
+ private:
+  void close_noexcept() noexcept {
+    cudaSetDevice(device_);
+    for (auto& slot : slots_) if (slot) {
+      try { drain_multi_penalty_gcv_capacity_l5_slot(slot); } catch (...) {}
+      slot.reset();
+      ++diagnostics_->destroyed;
+    }
+    for (auto& event : events_) if (event) { cudaEventDestroy(event); event = nullptr; }
+  }
+  const std::vector<MultiPenaltyGcvL5Geometry>& geometry_;
+  L5OptimizerSlotDiagnostics* diagnostics_;
+  int device_ = -1;
+  std::vector<std::shared_ptr<MultiPenaltyGcvCapacityPrepared>> slots_;
+  std::vector<cudaEvent_t> events_;
 };
 
 MultiPenaltyPrefillWindowWork prepare_multi_penalty_prefill_window(
@@ -5052,6 +5196,18 @@ MultiPenaltyPrefillWindowWork prepare_multi_penalty_prefill_window(
     }
     work.maximum_concurrency = std::min(
       work.maximum_concurrency, static_cast<int>(work.metadata.size()));
+    if (diagnostics->l4_optimizer_workers32_enabled && plan.level == 4) {
+      // Preserve the original window, prepared objects, and target cohorts.
+      // Only cap host workers feeding the unchanged per-setup CUDA optimizer.
+      for (const auto& request : work.metadata) {
+        require(request.context->n == 351 &&
+                  request.context->coefficient_dim == 37 &&
+                  request.context->penalty_count == 4 &&
+                  request.targets.size() >= 2U && request.targets.size() <= 18U,
+                "L4 optimizer workers require the qualified q37/four-penalty cohort envelope");
+      }
+      work.maximum_concurrency = std::min(work.maximum_concurrency, 32);
+    }
   }
   work.preparation_ms = elapsed_ms(work.started);
   return work;
@@ -5128,7 +5284,8 @@ void complete_multi_penalty_prefill_window(
     MultiPenaltyPrefillWindowWork* work,
     MultiPenaltyGcvCapacityMultiResult optimization,
     ExactPrimaryCoefficientArena* coefficient_arena,
-    OneCallDiagnostics* diagnostics) {
+    OneCallDiagnostics* diagnostics,
+    L5OptimizerSlotPool* slots = nullptr) {
   require(work != nullptr && diagnostics != nullptr &&
             !work->metadata.empty(),
           "multi-penalty prefill completion state is malformed");
@@ -5139,7 +5296,8 @@ void complete_multi_penalty_prefill_window(
               optimization.diagnostics.setup_count ==
                 static_cast<int>(work->metadata.size()) &&
               optimization.diagnostics.max_host_calls_in_flight > 0 &&
-              ((coefficient_arena != nullptr && coefficient_arena->enabled()) ?
+              ((coefficient_arena != nullptr && coefficient_arena->enabled() &&
+                !work->coefficients_already_detached) ?
                  optimization.residuals.size() == work->metadata.size() :
                  optimization.residuals.empty()),
             "multi-penalty cross-setup CUDA optimizer coverage changed");
@@ -5236,9 +5394,14 @@ void complete_multi_penalty_prefill_window(
         diagnostics->prefill_target_keys.insert(base_key);
       }
       if (coefficient_arena != nullptr && coefficient_arena->enabled()) {
-        coefficient_arena->enqueue_store(
-          work->batch.level, request.base_target_keys, exact_residual_keys,
-          optimization.residuals[setup_index]);
+        if (work->coefficients_already_detached) {
+          require(slots && coefficient_arena->contains_all(work->batch.level, exact_residual_keys),
+                  "L5 detached coefficient identity failed closed");
+        } else {
+          coefficient_arena->enqueue_store(
+            work->batch.level, request.base_target_keys, exact_residual_keys,
+            optimization.residuals[setup_index]);
+        }
         if (diagnostics->level_component_prefill_enabled) {
           work->metadata[setup_index].prefill_residual_keys = exact_residual_keys;
         }
@@ -5256,11 +5419,13 @@ void complete_multi_penalty_prefill_window(
         const auto stage_a_started = std::chrono::steady_clock::now();
         const auto cache = diagnostics->level_component_cache.lock();
         require(cache != nullptr, "level component prefill cache expired");
+        std::size_t stage_a_index = 0;
         for (const auto& request : work->metadata) {
+          const auto stage_a_prepared = slots ? slots->stage_a(stage_a_index++) : request.context->multi_penalty;
           const int total = static_cast<int>(request.targets.size());
           const int cohorts = (total + 15) / 16;
           int offset = 0;
-          require(request.context->multi_penalty &&
+          require(stage_a_prepared &&
                     request.prefill_residual_keys.size() == request.targets.size() &&
                     request.prefill_Y.size() == request.targets.size() * request.context->n,
                   "level prefill lost its window inputs or prepared handle");
@@ -5274,7 +5439,7 @@ void complete_multi_penalty_prefill_window(
             std::shared_ptr<MultiPenaltyGcvCapacityResidualBatch> residual;
             try {
               residual = multi_penalty_gcv_capacity_finalize_selected_coefficients(
-                request.context->multi_penalty,
+                stage_a_prepared,
                 request.prefill_Y.data() + static_cast<std::size_t>(offset) * request.context->n,
                 coefficients, request.context->n, count, keys);
               store_full_cuda_ci_level_component_residual(cache,
@@ -5321,6 +5486,9 @@ void complete_multi_penalty_prefill_window(
   work->batch.target_optimization_count = static_cast<int>(
     work->batch.optimized_target_keys.size());
   work->batch.optimizer_host_ms = optimization.diagnostics.wall_host_ms;
+  work->batch.optimizer_requested_concurrency = optimization.diagnostics.requested_concurrency;
+  work->batch.optimizer_worker_count = optimization.diagnostics.worker_count;
+  work->batch.optimizer_peak_host_calls = optimization.diagnostics.max_host_calls_in_flight;
   work->batch.batch_wall_ms = logical_boundary_ms;
 }
 
@@ -5364,6 +5532,128 @@ struct PendingMultiPenaltyPrefillWindow {
   std::future<MultiPenaltyGcvCapacityMultiResult> optimization;
 };
 
+void prefill_l5_slot_target_states(
+    const Rcpp::NumericMatrix& data, const LayerPlan& plan,
+    const std::vector<SinglePenaltyPrefillGroup>& groups,
+    ExactPrimaryCoefficientArena* arena, OneCallDiagnostics* diagnostics) {
+  require(plan.level == 5 && arena && arena->enabled() && diagnostics->l5_slots.enabled,
+          "L5 slot prefill configuration changed");
+  PrefillBatchDiagnostic batch;
+  batch.level = 5;
+  batch.penalty_class = "multi";
+  batch.window_id = 1;  // One real whole-layer optimizer boundary, no fictitious windows.
+  batch.conditioning_group_count = static_cast<int>(groups.size());
+  auto work = prepare_multi_penalty_prefill_window(data, plan, groups, std::move(batch), diagnostics, true);
+  if (work.requests.empty()) return;
+  auto& d = diagnostics->l5_slots;
+  std::vector<MultiPenaltyGcvL5Geometry> geometry;
+  geometry.reserve(work.metadata.size());
+  std::size_t targets = 0;
+  for (std::size_t i = 0; i < work.requests.size(); ++i) {
+    auto& request = work.requests[i];
+    require(request.target_count == 2 || request.target_count == 3 ||
+              request.target_count == 4 || request.target_count == 8,
+            "L5 slot target cohort is outside the qualified 2/3/4/8 envelope");
+    require(request.control.exact_primary_only &&
+              request.control.decomposition_trace_capacity_per_target == 0,
+            "L5 slot optimizer control is outside the qualified envelope");
+    request.control.force_final_selected_evaluation = true;
+    targets += request.target_count;
+    geometry.push_back(pack_l5_slot_geometry(work.metadata[i].context));
+  }
+  arena->reserve_slot_layer(5, 46, targets);
+  L5OptimizerSlotPool pool(geometry, &d);
+  d.prepare_ms = elapsed_ms(work.started);
+  work.preparation_ms = d.prepare_ms;
+  MultiPenaltyGcvCapacityMultiResult optimization;
+  optimization.setups.resize(work.requests.size());
+  auto& md = optimization.diagnostics;
+  md.schema_version = "full-cuda-ci-l5-slot-optimizer-v1";
+  md.execution_strategy = "original-order-l5-32-reusable-slots";
+  md.setup_count = static_cast<int>(work.requests.size());
+  md.target_count = static_cast<int>(targets);
+  md.requested_concurrency = md.worker_count = md.setup_stream_count = pool.size();
+  std::vector<double> bind_ms(work.requests.size()), detach_ms(work.requests.size());
+  std::atomic<std::size_t> next{0};
+  std::atomic<bool> cancelled{false};
+  std::atomic<int> active{0}, peak{0};
+  std::mutex detach_mutex, error_mutex;
+  std::exception_ptr error;
+  std::vector<std::thread> workers;
+  const auto started = std::chrono::steady_clock::now();
+  const auto worker = [&](int slot) {
+    std::shared_ptr<MultiPenaltyGcvCapacityResidualBatch> pending;
+    try {
+      while (!cancelled.load()) {
+        const std::size_t i = next.fetch_add(1);
+        if (i >= work.requests.size()) break;
+        const auto& request = work.requests[i];
+        const int now = active.fetch_add(1) + 1;
+        int observed = peak.load();
+        while (observed < now && !peak.compare_exchange_weak(observed, now)) {}
+        auto at = std::chrono::steady_clock::now();
+        pool.bind(slot, i);
+        bind_ms[i] = elapsed_ms(at);
+        auto result = multi_penalty_gcv_capacity_optimize_batch_with_residual(
+          pool.slot(slot), request.Y.data(), request.n, request.target_count,
+          request.target_keys, request.control);
+        pending = std::move(result.residual);
+        const auto& values = result.optimization.selected_log_sp;
+        require(values.size() == static_cast<std::size_t>(5 * request.target_count),
+                "L5 optimizer selected-SP size changed");
+        std::vector<std::string> keys;
+        for (int j = 0; j < request.target_count; ++j) {
+          keys.push_back(exact_fixed_residual_key(request.target_keys[j], values.data() + 5 * j, 5));
+        }
+        at = std::chrono::steady_clock::now();
+        {
+          std::lock_guard<std::mutex> lock(detach_mutex);
+          arena->enqueue_store(5, request.target_keys, keys, pending);
+          arena->record_slot_store(pool.event(slot));
+        }
+        check_one_call_cuda(cudaEventSynchronize(pool.event(slot)), "wait for L5 coefficient detach");
+        release_multi_penalty_gcv_capacity_residual(pending);
+        pending.reset();
+        detach_ms[i] = elapsed_ms(at);
+        optimization.setups[i] = std::move(result.optimization);
+        active.fetch_sub(1);
+      }
+    } catch (...) {
+      cancelled.store(true);
+      { std::lock_guard<std::mutex> lock(error_mutex); if (!error) error = std::current_exception(); }
+      // Do not release an output lease until all consumers of it have drained.
+      arena->synchronize_noexcept();
+      try { drain_multi_penalty_gcv_capacity_l5_slot(pool.slot(slot)); } catch (...) {}
+      if (pending) { try { release_multi_penalty_gcv_capacity_residual(pending); } catch (...) {} }
+    }
+  };
+  try {
+    for (int slot = 0; slot < pool.size(); ++slot) workers.emplace_back(worker, slot);
+  } catch (...) {
+    cancelled.store(true);
+    for (auto& thread : workers) thread.join();
+    arena->synchronize_noexcept();
+    throw;
+  }
+  for (auto& thread : workers) thread.join();
+  if (error) { arena->synchronize_noexcept(); std::rethrow_exception(error); }
+  md.wall_host_ms = d.work_ms = elapsed_ms(started);
+  md.max_host_calls_in_flight = d.peak_workers = peak.load();
+  for (const auto& result : optimization.setups) md.summed_setup_host_ms += result.diagnostics.total_host_ms;
+  md.host_overlap_factor = md.summed_setup_host_ms / md.wall_host_ms;
+  d.bind_sum_ms = std::accumulate(bind_ms.begin(), bind_ms.end(), 0.0);
+  d.detach_sum_ms = std::accumulate(detach_ms.begin(), detach_ms.end(), 0.0);
+  d.layers = 1;
+  d.setups = d.optimizer_binds = d.detached = md.setup_count;
+  d.targets = md.target_count;
+  work.coefficients_already_detached = true;
+  complete_multi_penalty_prefill_window(&work, std::move(optimization), arena, diagnostics, &pool);
+  pool.close();
+  diagnostics->cuda_optimizer_host_ms += d.destroy_ms;
+  work.batch.batch_wall_ms += d.destroy_ms;
+  diagnostics->prefill_batches.push_back(std::move(work.batch));
+}
+
 void prefill_multi_penalty_level_target_states(
     const Rcpp::NumericMatrix& data,
     const LayerPlan& plan,
@@ -5384,6 +5674,15 @@ void prefill_multi_penalty_level_target_states(
   std::vector<SinglePenaltyPrefillGroup> window;
   window.reserve(
     static_cast<std::size_t>(kMultiPenaltyGcvMaximumConcurrentSetups));
+  if (diagnostics->l5_slots.enabled && plan.level == 5) {
+    for (const auto& entry : tasks_by_conditioning) {
+      require(!entry.second.empty(), "L5 slot conditioning group is empty");
+      const auto& task = plan.tasks[static_cast<std::size_t>(entry.second.front())];
+      window.push_back(SinglePenaltyPrefillGroup{setup_cache->get(task.conditioning_set), entry.second});
+    }
+    prefill_l5_slot_target_states(data, plan, window, coefficient_arena, diagnostics);
+    return;
+  }
   std::size_t window_capacity =
     static_cast<std::size_t>(kMultiPenaltyGcvMaximumConcurrentSetups);
   int window_id = 0;
@@ -6741,6 +7040,25 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
   diagnostics.fixed_sp_root_cache_enabled = enable_fixed_sp_root_cache;
   diagnostics.cuda_multi_penalty_decomposition_trace_capacity_per_target =
     decomposition_trace_capacity_from_environment();
+  diagnostics.l5_slots.enabled = level_component_flag("FASTKPC_DCC_GAMMA_L5_OPTIMIZER_SLOTS");
+  diagnostics.l4_optimizer_workers32_enabled =
+    level_component_flag("FASTKPC_DCC_GAMMA_L4_OPTIMIZER_WORKERS32");
+  require(!diagnostics.l4_optimizer_workers32_enabled ||
+            (method_options.ci_method == "dcc.gamma" && n == 351 && p == 48 &&
+             diagnostics.l2_component_prefill_enabled &&
+             diagnostics.exact_primary_fixed_reuse_requested &&
+             !diagnostics.setup_optimizer_pipeline_enabled &&
+             diagnostics.cuda_multi_penalty_decomposition_trace_capacity_per_target == 0 &&
+             level_component_flag("FASTKPC_MULTI_PENALTY_STATUS_WAIT_BEFORE_D2H")),
+          "L4 optimizer workers require canonical S2, exact-primary reuse, status wait and original setup scheduling");
+  require(!diagnostics.l5_slots.enabled ||
+            (method_options.ci_method == "dcc.gamma" && n == 351 && p == 48 &&
+             diagnostics.l2_component_prefill_enabled &&
+             diagnostics.exact_primary_fixed_reuse_requested &&
+             !diagnostics.setup_optimizer_pipeline_enabled &&
+             diagnostics.cuda_multi_penalty_decomposition_trace_capacity_per_target == 0 &&
+             level_component_flag("FASTKPC_MULTI_PENALTY_STATUS_WAIT_BEFORE_D2H")),
+          "L5 optimizer slots require canonical S2, exact-primary reuse, status wait and original setup scheduling");
   const CompactResultCache::Snapshot result_cache_start =
     compact_result_cache().snapshot(dataset);
   diagnostics.result_cache_capacity = result_cache_start.capacity;
@@ -8175,6 +8493,11 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
 
   const DecompositionReuseAggregate& decomposition_reuse =
     diagnostics.cuda_multi_penalty_decomposition_reuse;
+  require(diagnostics.l5_slots.created == diagnostics.l5_slots.destroyed &&
+            diagnostics.l5_slots.optimizer_binds == diagnostics.l5_slots.detached &&
+            diagnostics.l5_slots.stage_a_binds == diagnostics.l5_slots.detached &&
+            (diagnostics.l5_slots.enabled || diagnostics.l5_slots.created == 0),
+          "L5 optimizer slot lifecycle failed closed");
   const bool decomposition_trace_enabled =
     diagnostics.cuda_multi_penalty_decomposition_trace_capacity_per_target >
       0;
@@ -8374,6 +8697,26 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
     Rcpp::Named("exact_primary_fixed_reuse_key_trace") =
       exact_primary_fixed_reuse_key_trace,
     Rcpp::Named("summary") = Rcpp::List::create(
+      Rcpp::Named("l4_optimizer_workers32_enabled") = diagnostics.l4_optimizer_workers32_enabled,
+      Rcpp::Named("l5_optimizer_slots") = Rcpp::List::create(
+        Rcpp::Named("enabled") = diagnostics.l5_slots.enabled,
+        Rcpp::Named("layers") = diagnostics.l5_slots.layers,
+        Rcpp::Named("setups") = diagnostics.l5_slots.setups,
+        Rcpp::Named("targets") = diagnostics.l5_slots.targets,
+        Rcpp::Named("created") = diagnostics.l5_slots.created,
+        Rcpp::Named("destroyed") = diagnostics.l5_slots.destroyed,
+        Rcpp::Named("optimizer_binds") = diagnostics.l5_slots.optimizer_binds,
+        Rcpp::Named("stage_a_binds") = diagnostics.l5_slots.stage_a_binds,
+        Rcpp::Named("detached") = diagnostics.l5_slots.detached,
+        Rcpp::Named("peak_workers") = diagnostics.l5_slots.peak_workers,
+        Rcpp::Named("free_before_create") = static_cast<double>(diagnostics.l5_slots.free_before),
+        Rcpp::Named("free_after_create") = static_cast<double>(diagnostics.l5_slots.free_after),
+        Rcpp::Named("prepare_ms") = diagnostics.l5_slots.prepare_ms,
+        Rcpp::Named("work_ms") = diagnostics.l5_slots.work_ms,
+        Rcpp::Named("destroy_ms") = diagnostics.l5_slots.destroy_ms,
+        Rcpp::Named("bind_sum_ms") = diagnostics.l5_slots.bind_sum_ms,
+        Rcpp::Named("detach_sum_ms") = diagnostics.l5_slots.detach_sum_ms,
+        Rcpp::Named("stage_a_bind_ms") = diagnostics.l5_slots.stage_a_bind_ms),
       Rcpp::Named("level_component_prefill_enabled") = diagnostics.level_component_prefill_enabled,
       Rcpp::Named("structured_component_prefill_enabled") = diagnostics.structured_component_prefill_enabled,
       Rcpp::Named("l2_component_prefill_enabled") = diagnostics.l2_component_prefill_enabled,

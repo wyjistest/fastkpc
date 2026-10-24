@@ -262,6 +262,41 @@ MultiPenaltyGcvCudaPreparedInfo multi_penalty_gcv_capacity_prepared_info(
   throw std::runtime_error("unknown multi-penalty CUDA capacity bucket");
 }
 
+std::shared_ptr<MultiPenaltyGcvCapacityPrepared>
+create_multi_penalty_gcv_capacity_l5_slot(
+    const MultiPenaltyGcvL5Geometry& g, int device_id) {
+  validate_multi_penalty_gcv_l5_geometry(g);
+  std::vector<std::vector<double>> roots, matrices;
+  for (int j = 0; j < 5; ++j) {
+    roots.emplace_back(g.roots.begin() + 46 * g.offsets[j],
+                       g.roots.begin() + 46 * (g.offsets[j] + g.ranks[j]));
+    matrices.emplace_back(g.matrices.begin() + 46 * 46 * j,
+                          g.matrices.begin() + 46 * 46 * (j + 1));
+  }
+  return create_multi_penalty_gcv_capacity_prepared(
+    g.X.data(), g.qr.data(), g.tau.data(), g.r.data(), g.pivot.data(),
+    roots, matrices, g.ranks, g.initial_log_sp.data(), 351, 46, 5, 8, device_id);
+}
+
+void rebind_multi_penalty_gcv_capacity_l5_slot(
+    const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& prepared,
+    const MultiPenaltyGcvL5Geometry& geometry) {
+  if (!prepared || prepared->bucket != MultiPenaltyGcvCapacityBucket::Small64) {
+    throw std::runtime_error("L5 slot requires the small64 backend");
+  }
+  rebind_multi_penalty_gcv_cuda_prepared_l5(
+    std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedsmall64>>(prepared->handle), geometry);
+}
+
+void drain_multi_penalty_gcv_capacity_l5_slot(
+    const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& prepared) {
+  if (!prepared || prepared->bucket != MultiPenaltyGcvCapacityBucket::Small64) {
+    throw std::runtime_error("L5 slot requires the small64 backend");
+  }
+  drain_multi_penalty_gcv_cuda_prepared_l5(
+    std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedsmall64>>(prepared->handle));
+}
+
 MultiPenaltyGcvCudaOptimization multi_penalty_gcv_capacity_optimize_batch(
     const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& prepared,
     const double* Y,

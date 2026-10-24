@@ -2,6 +2,7 @@
 #define FASTKPC_MGCV_MULTI_PENALTY_GCV_CAPACITY_HPP
 
 #include "mgcv_multi_penalty_gcv.hpp"
+#include "mgcv_multi_penalty_gcv_l5.hpp"
 
 #include <memory>
 #include <string>
@@ -19,6 +20,17 @@ enum class MultiPenaltyGcvCapacityBucket {
 
 class MultiPenaltyGcvCapacityPrepared;
 class MultiPenaltyGcvCapacityResidualBatch;
+
+// Default-off L5 runtime experiment. Each slot has capacity eight; calls still
+// use the original target counts. A live residual lease forbids rebinding.
+std::shared_ptr<MultiPenaltyGcvCapacityPrepared>
+create_multi_penalty_gcv_capacity_l5_slot(
+    const MultiPenaltyGcvL5Geometry& geometry, int device_id);
+void rebind_multi_penalty_gcv_capacity_l5_slot(
+    const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& prepared,
+    const MultiPenaltyGcvL5Geometry& geometry);
+void drain_multi_penalty_gcv_capacity_l5_slot(
+    const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& prepared);
 
 struct MultiPenaltyGcvCapacityRequest {
   std::shared_ptr<MultiPenaltyGcvCapacityPrepared> prepared;
