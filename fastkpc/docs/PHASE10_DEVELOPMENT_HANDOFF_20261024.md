@@ -1,5 +1,9 @@
 # Phase 10 开发交接：optimizer status wait、L5 slots 与 L4 worker cap
 
+最新仓库收口见 [2026-10-28 开发交接](PHASE10_DEVELOPMENT_HANDOFF_20261028.md)：
+runtime `1d8a11d`、工具 `2920ab8`，accepted opt-in development median 为 311.440 秒。
+本页及原 attestation 保留 10-24 的历史身份；最新结果仍为 source-closure development evidence。
+
 后续进展：L4 有界槽位的 runtime 与工具现已分别提交为 `4a1ff6b` / `1c27d6f`。
 [后续 runtime 报告](PHASE10_OPTIMIZER_L4_SLOT_RUNTIME_20261024.md)记录隔离 OFF/ON
 中位数 **463.288/407.531 秒**及完整硬门；[新的 Git attestation](PHASE10_L4_SLOT_SOURCE_ATTESTATION_20261024.json)
