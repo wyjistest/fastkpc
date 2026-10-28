@@ -30,7 +30,8 @@ trap 'rm -f "$TMP_SO"' EXIT INT TERM
 
 # Dedicated numerical contract: never compile structured kernels into the
 # consumer TU or inherit its FMA policy. Regenerate from the vendored LAPACK.
-python3 -I "$ROOT/tools/generate_recorded_dbdsqr.py" "$BUILD/recorded_dbdsqr.inc"
+python3 -I "$ROOT/tools/generate_recorded_dbdsqr.py" "$BUILD/recorded_dbdsqr.inc" \
+  "$BUILD/recorded_dbdsqr_fixed_vt.inc"
 "$NVCC" -O3 -arch=sm_89 --fmad=false -DFASTKPC_STRUCTURED_FMAD_DISABLED=1 \
   -diag-suppress 2464 -Xcompiler -fPIC -std=c++17 -I"$BUILD" \
   $COMMON_INC -c "$ROOT/src/cuda/full_cuda_ci_structured_eig.cu" \

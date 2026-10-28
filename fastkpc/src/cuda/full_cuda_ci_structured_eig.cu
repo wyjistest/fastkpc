@@ -8,8 +8,10 @@
 #include <cuda_runtime.h>
 #include <math_constants.h>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -69,6 +71,7 @@ __device__ int record_dswap_(RotationLog* log, int* n, double* x, int*, double* 
 #define min(a,b) ((a) <= (b) ? (a) : (b))
 #define max(a,b) ((a) >= (b) ? (a) : (b))
 #include "recorded_dbdsqr.inc"
+#include "recorded_dbdsqr_fixed_vt.inc"
 #undef TRUE_
 #undef FALSE_
 #undef abs
@@ -79,6 +82,8 @@ __device__ int record_dswap_(RotationLog* log, int* n, double* x, int*, double* 
 namespace {
 using fastkpc::lapack312::Rotation;
 using fastkpc::lapack312::RotationLog;
+using fastkpc::StructuredDbdsqrMode;
+std::atomic<std::uint64_t> plans_created[2]{}, plans_destroyed[2]{}, submissions[2]{}, targets[2]{};
 constexpr int max_n = 1024;
 constexpr int max_k = 128;
 constexpr int vectors_per_component = 20;
@@ -168,6 +173,7 @@ __global__ void prepare(const double* input, int n, double* data, int* ints, Met
   meta[component] = z;
 }
 
+template<StructuredDbdsqrMode Mode>
 __global__ void bidiagonal(int n, double* data, int* ints, Meta* meta,
                           Rotation* rotations, int capacity) {
   const int component = blockIdx.x;
@@ -189,8 +195,13 @@ __global__ void bidiagonal(int n, double* data, int* ints, Meta* meta,
   RotationLog log{rotations+size_t(component)*capacity, q, 0, capacity, 0};
   int r = z.m-1, one = 1, zero = 0, info = 0;
   double dummy[4] = {};
-  fastkpc::lapack312::recorded_dbdsqr_(const_cast<char*>("L"), &r, &one, &zero, &zero,
-      d, e, q, &r, dummy+2, &one, dummy+2, &one, work, &info, 1, &log);
+  if constexpr (Mode == StructuredDbdsqrMode::FixedVtWorkPair) {
+    fastkpc::lapack312::recorded_dbdsqr_fixed_vt_(const_cast<char*>("L"), &r, &one, &zero, &zero,
+        d, e, q, &r, dummy+2, &one, dummy+2, &one, work, &info, 1, &log);
+  } else {
+    fastkpc::lapack312::recorded_dbdsqr_(const_cast<char*>("L"), &r, &one, &zero, &zero,
+        d, e, q, &r, dummy+2, &one, dummy+2, &one, work, &info, 1, &log);
+  }
   z.rotations = log.count;
   if (info || log.overflow) { z.info = info ? 10+info : 20+log.overflow; return; }
   double norm_b = 0;
@@ -372,6 +383,8 @@ void structured_check(cudaError_t status) {
 
 namespace fastkpc {
 struct StructuredComponentPlan {
+  explicit StructuredComponentPlan(StructuredDbdsqrMode selected) : mode(selected) {}
+  const StructuredDbdsqrMode mode;
   int n, k, count, capacity, tile;
   cudaStream_t stream;
   double *data, *evals, *vectors, *means;
@@ -389,7 +402,8 @@ StructuredComponentPlan* create_structured_component_plan(
       2*(k+1)+4 > n || count < 1 || count > 64 ||
       rotation_capacity < 1 || !stream || !allocate)
     throw std::runtime_error("unsupported structured component capacity");
-  auto* c = new StructuredComponentPlan{};
+  const auto mode = parse_structured_dbdsqr_mode(std::getenv("FASTKPC_DCC_GAMMA_STRUCTURED_WORK_PAIR"));
+  auto* c = new StructuredComponentPlan(mode);
   try {
     c->n=n; c->k=k+1; c->count=count; c->capacity=rotation_capacity; c->stream=stream;
     int device=0, shared_limit=0;
@@ -398,7 +412,13 @@ StructuredComponentPlan* create_structured_component_plan(
     c->tile=std::min(c->k,std::min(64,shared_limit/int(n*sizeof(double))));
     if (c->tile < 1) throw std::runtime_error("insufficient structured shared memory");
     structured_check(cudaFuncSetAttribute(recover,cudaFuncAttributeMaxDynamicSharedMemorySize,c->tile*n*sizeof(double)));
-    structured_check(cudaFuncSetAttribute(bidiagonal,cudaFuncAttributeMaxDynamicSharedMemorySize,7*n*sizeof(double)));
+    const auto shared_bytes = structured_dbdsqr_shared_bytes(c->mode,n);
+    if (c->mode == StructuredDbdsqrMode::FixedVtWorkPair)
+      structured_check(cudaFuncSetAttribute(bidiagonal<StructuredDbdsqrMode::FixedVtWorkPair>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,shared_bytes));
+    else
+      structured_check(cudaFuncSetAttribute(bidiagonal<StructuredDbdsqrMode::Original>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,shared_bytes));
     const size_t rows=size_t(n)*count, cols=size_t(c->k)*count;
     c->data=static_cast<double*>(allocate(owner,rows*vectors_per_component*sizeof(double)));
     c->ints=static_cast<int*>(allocate(owner,rows*4*sizeof(int)));
@@ -409,17 +429,38 @@ StructuredComponentPlan* create_structured_component_plan(
     c->candidates=static_cast<Candidate*>(allocate(owner,size_t(count)*(2*c->k+4)*sizeof(Candidate)));
     c->rotations=static_cast<lapack312::Rotation*>(allocate(owner,size_t(count)*rotation_capacity*sizeof(lapack312::Rotation)));
     c->status=static_cast<StructuredComponentStatus*>(allocate(owner,count*sizeof(StructuredComponentStatus)));
+    plans_created[static_cast<int>(c->mode)].fetch_add(1,std::memory_order_relaxed);
     return c;
   } catch (...) { delete c; throw; }
 }
-void destroy_structured_component_plan(StructuredComponentPlan* p) noexcept { delete p; }
+void destroy_structured_component_plan(StructuredComponentPlan* p) noexcept {
+  if (p) plans_destroyed[static_cast<int>(p->mode)].fetch_add(1,std::memory_order_relaxed);
+  delete p;
+}
 
-StructuredComponentView submit_structured_components(
+StructuredDbdsqrMode structured_component_plan_mode(const StructuredComponentPlan* p) {
+  if (!p) throw std::runtime_error("missing structured plan");
+  return p->mode;
+}
+
+StructuredComponentExecutionCounts structured_component_execution_counts() noexcept {
+  StructuredComponentExecutionCounts result;
+  for (int m=0;m<2;++m) {
+    result.created[m]=plans_created[m].load(std::memory_order_relaxed);
+    result.destroyed[m]=plans_destroyed[m].load(std::memory_order_relaxed);
+    result.submissions[m]=submissions[m].load(std::memory_order_relaxed);
+    result.targets[m]=targets[m].load(std::memory_order_relaxed);
+  }
+  return result;
+}
+
+template<StructuredDbdsqrMode Mode>
+StructuredComponentView submit_structured_mode(
     StructuredComponentPlan* c, const double* input, int count) {
-  if (!c || !input || count < 1 || count > c->count)
-    throw std::runtime_error("invalid structured component submission");
+  const auto shared_bytes = structured_dbdsqr_shared_bytes(Mode,c->n);
+  validate_structured_dbdsqr_launch(c->mode,Mode,c->n,shared_bytes,'L',1,0,0);
   prepare<<<count,128,0,c->stream>>>(input,c->n,c->data,c->ints,c->meta);
-  bidiagonal<<<count,32,7*c->n*sizeof(double),c->stream>>>(
+  bidiagonal<Mode><<<count,32,shared_bytes,c->stream>>>(
     c->n,c->data,c->ints,c->meta,c->rotations,c->capacity);
   roots<<<count,128,0,c->stream>>>(c->n,c->k,c->data,c->ints,c->meta,c->candidates);
   recover<<<dim3(count,(c->k+c->tile-1)/c->tile),64,c->tile*c->n*sizeof(double),c->stream>>>(
@@ -428,6 +469,17 @@ StructuredComponentView submit_structured_components(
   check_structured_boundary<<<(count+127)/128,128,0,c->stream>>>(
     c->meta,c->evals,c->k-1,count,c->status);
   structured_check(cudaGetLastError());
+  submissions[static_cast<int>(Mode)].fetch_add(1,std::memory_order_relaxed);
+  targets[static_cast<int>(Mode)].fetch_add(count,std::memory_order_relaxed);
   return {c->evals,c->vectors,c->status};
+}
+
+StructuredComponentView submit_structured_components(
+    StructuredComponentPlan* c, const double* input, int count) {
+  if (!c || !input || count < 1 || count > c->count)
+    throw std::runtime_error("invalid structured component submission");
+  if (c->mode == StructuredDbdsqrMode::FixedVtWorkPair)
+    return submit_structured_mode<StructuredDbdsqrMode::FixedVtWorkPair>(c,input,count);
+  return submit_structured_mode<StructuredDbdsqrMode::Original>(c,input,count);
 }
 }  // namespace fastkpc

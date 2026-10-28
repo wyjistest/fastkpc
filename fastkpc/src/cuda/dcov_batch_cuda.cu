@@ -1,4 +1,5 @@
 #include "dcov_batch_cuda.hpp"
+#include "cuda_device_properties.hpp"
 
 #include <Rmath.h>
 #include <cuda_runtime.h>
@@ -357,7 +358,7 @@ double nonnegative_gap(double total, double accounted) {
 
 int query_dcov_grid_batch_dimension(int device) {
   cudaDeviceProp prop;
-  check_cuda(cudaGetDeviceProperties(&prop, device), "get device properties");
+  check_cuda(fastkpc_cuda_get_device_properties(&prop, device), "get device properties");
   const int y_limit = prop.maxGridSize[1];
   const int z_limit = prop.maxGridSize[2];
   const int limit = std::min(y_limit, z_limit);

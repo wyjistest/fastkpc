@@ -1,4 +1,5 @@
 #include "mgcv_fixed_sp_runtime.hpp"
+#include "cuda_device_properties.hpp"
 #include "mgcv_fixed_sp_stable.cuh"
 
 #include <cublas_v2.h>
@@ -2958,7 +2959,7 @@ CudaRuntimeContext::CudaRuntimeContext(int requested_device) {
     check_cuda(cudaSetDevice(device_id), "set CUDA device");
 
     cudaDeviceProp properties;
-    check_cuda(cudaGetDeviceProperties(&properties, device_id),
+    check_cuda(fastkpc_cuda_get_device_properties(&properties, device_id),
                "query CUDA device properties");
     diagnostics.gpu_name = properties.name;
     diagnostics.gpu_uuid = format_cuda_uuid(properties.uuid);

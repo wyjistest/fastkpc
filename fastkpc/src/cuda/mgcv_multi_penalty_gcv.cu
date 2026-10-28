@@ -1,4 +1,5 @@
 #include "mgcv_multi_penalty_gcv.hpp"
+#include "cuda_device_properties.hpp"
 
 #define FASTKPC_LAPACK_SMALL_MAX_COLUMNS \
   FASTKPC_MULTI_PENALTY_MAX_COEFFICIENT_DIM
@@ -3814,7 +3815,7 @@ MultiPenaltyGcvCudaEvaluation multi_penalty_gcv_evaluate_cuda(
   check_cuda(cudaGetDevice(&diagnostics.device_id),
              "query multi-penalty GCV device");
   cudaDeviceProp properties{};
-  check_cuda(cudaGetDeviceProperties(&properties, diagnostics.device_id),
+  check_cuda(fastkpc_cuda_get_device_properties(&properties, diagnostics.device_id),
              "query multi-penalty GCV device properties");
   diagnostics.gpu_name = properties.name;
 
@@ -4546,7 +4547,7 @@ multi_penalty_gcv_grouped_evaluate_prototype_cuda(
   check_cuda(cudaGetDevice(&evaluation_diagnostics.device_id),
              "query grouped prototype CUDA device");
   cudaDeviceProp properties{};
-  check_cuda(cudaGetDeviceProperties(
+  check_cuda(fastkpc_cuda_get_device_properties(
                &properties, evaluation_diagnostics.device_id),
              "query grouped prototype CUDA properties");
   evaluation_diagnostics.gpu_name = properties.name;
@@ -5090,7 +5091,7 @@ MultiPenaltyGcvCudaOptimization multi_penalty_gcv_optimize_cuda(
   check_cuda(cudaGetDevice(&diagnostics.device_id),
              "query multi-penalty optimizer device");
   cudaDeviceProp properties{};
-  check_cuda(cudaGetDeviceProperties(&properties, diagnostics.device_id),
+  check_cuda(fastkpc_cuda_get_device_properties(&properties, diagnostics.device_id),
              "query multi-penalty optimizer device properties");
   diagnostics.gpu_name = properties.name;
 
@@ -5645,7 +5646,7 @@ create_multi_penalty_gcv_cuda_prepared(
     check_cuda(cudaStreamSynchronize(prepared->stream.get()),
                "synchronize persistent multi-penalty setup");
     cudaDeviceProp properties{};
-    check_cuda(cudaGetDeviceProperties(&properties, device_id),
+    check_cuda(fastkpc_cuda_get_device_properties(&properties, device_id),
                "query persistent multi-penalty device properties");
     prepared->info.device_id = device_id;
     prepared->info.gpu_name = properties.name;

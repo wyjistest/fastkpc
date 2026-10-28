@@ -5,8 +5,10 @@
 #include "skeleton_task_scheduler.hpp"
 #include "cuda/full_cuda_ci_method_batch.hpp"
 #include "cuda/full_cuda_ci_vertical.hpp"
+#include "cuda/full_cuda_ci_structured_eig.hpp"
 #include "cuda/mgcv_fixed_sp_runtime.hpp"
 #include "cuda/mgcv_multi_penalty_gcv_capacity.hpp"
+#include "cuda/mgcv_l3_optimizer_slot_capacity.hpp"
 #include "cuda/mgcv_single_penalty_gcv.hpp"
 
 #include <RcppEigen.h>
@@ -1535,12 +1537,18 @@ struct OptimizerSlotDiagnostics {
   int optimizer_binds = 0, stage_a_binds = 0, detached = 0, peak_workers = 0;
   std::size_t free_before = 0, free_after = 0;
   std::size_t minimum_free = 0, maximum_pool_increment = 0;
+  // L3 split raw checkpoints, all relative to the original post-arena baseline.
+  std::size_t free_after_optimizer = 0, creation_increment = 0;
+  std::size_t optimizer_growth = 0, optimizer_total_increment = 0;
+  std::size_t stage_a_maximum_increment = 0;
+  int capacity_checkpoints = 0, stage_a_capacity_checkpoints = 0;
+  double pool_create_ms = 0.0;
   double prepare_ms = 0.0, work_ms = 0.0, destroy_ms = 0.0;
   double bind_sum_ms = 0.0, detach_sum_ms = 0.0, stage_a_bind_ms = 0.0;
 };
 
 struct OneCallDiagnostics {
-  OptimizerSlotDiagnostics l4_slots, l5_slots;
+  OptimizerSlotDiagnostics l3_slots, l4_slots, l5_slots, l6_slots;
   bool l4_optimizer_workers32_enabled = false;
   bool level_component_prefill_enabled = false;
   bool structured_component_prefill_enabled = false;
@@ -4991,7 +4999,21 @@ struct MultiPenaltyPrefillWindowWork {
   bool coefficients_already_detached = false;
 };
 
-// Only the two independently qualified envelopes use reusable optimizer slots.
+// Only independently qualified envelopes use reusable optimizer slots.
+struct L3OptimizerSlotPolicy {
+  using Geometry = MultiPenaltyGcvL3Geometry;
+  static constexpr int level = 3, q = 28, penalties = 3;
+  static void validate(const Geometry& g) { validate_multi_penalty_gcv_l3_geometry(g); }
+  static bool cohort(int count) { return count >= 2 && count <= 33; }
+  static auto create(const Geometry& g, int device) { return create_multi_penalty_gcv_capacity_l3_slot(g, device); }
+  static void bind(const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& p, const Geometry& g) {
+    rebind_multi_penalty_gcv_capacity_l3_slot(p, g);
+  }
+  static void drain(const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& p) {
+    drain_multi_penalty_gcv_capacity_l3_slot(p);
+  }
+};
+
 struct L4OptimizerSlotPolicy {
   using Geometry = MultiPenaltyGcvL4Geometry;
   static constexpr int level = 4, q = 37, penalties = 4;
@@ -5022,6 +5044,20 @@ struct L5OptimizerSlotPolicy {
   }
   static void drain(const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& p) {
     drain_multi_penalty_gcv_capacity_l5_slot(p);
+  }
+};
+
+struct L6OptimizerSlotPolicy {
+  using Geometry = MultiPenaltyGcvL6Geometry;
+  static constexpr int level = 6, q = 55, penalties = 6;
+  static void validate(const Geometry& g) { validate_multi_penalty_gcv_l6_geometry(g); }
+  static bool cohort(int count) { return count == 2 || count == 3 || count == 5; }
+  static auto create(const Geometry& g, int device) { return create_multi_penalty_gcv_capacity_l6_slot(g, device); }
+  static void bind(const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& p, const Geometry& g) {
+    rebind_multi_penalty_gcv_capacity_l6_slot(p, g);
+  }
+  static void drain(const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& p) {
+    drain_multi_penalty_gcv_capacity_l6_slot(p);
   }
 };
 
@@ -5070,6 +5106,7 @@ class OptimizerSlotPool : public OptimizerSlotStageA {
   OptimizerSlotPool(const std::vector<typename Policy::Geometry>& geometry,
                     OptimizerSlotDiagnostics* diagnostics)
       : geometry_(geometry), diagnostics_(diagnostics) {
+    const auto creation_started = std::chrono::steady_clock::now();
     require(!geometry.empty() && diagnostics, "optimizer slot pool has no geometry");
     const auto largest = std::max_element(geometry.begin(), geometry.end(),
       [](const auto& a, const auto& b) { return a.roots.size() < b.roots.size(); });
@@ -5088,6 +5125,7 @@ class OptimizerSlotPool : public OptimizerSlotStageA {
       require(diagnostics_->free_after >= 2ULL * 1024 * 1024 * 1024,
               "optimizer slot pool and production cache have less than 2 GiB headroom");
       observe_capacity(true);
+      if constexpr (Policy::level == 3) diagnostics_->pool_create_ms = elapsed_ms(creation_started);
     } catch (...) { close_noexcept(); throw; }
   }
   ~OptimizerSlotPool() { close_noexcept(); }
@@ -5128,9 +5166,33 @@ class OptimizerSlotPool : public OptimizerSlotStageA {
   }
  private:
   void observe_capacity(bool pool_increment) {
-    if constexpr (Policy::level == 4) {
+    if constexpr (Policy::level == 3) {
+      namespace capacity = l3_optimizer_slot_capacity;
       std::size_t free = 0, total = 0;
-      check_one_call_cuda(cudaMemGetInfo(&free, &total), "L4 slot joint memory");
+      check_one_call_cuda(cudaMemGetInfo(&free, &total), "L3 optimizer slot raw capacity checkpoint");
+      const auto phase = !l3_creation_checked_ ? capacity::Phase::creation :
+        (pool_increment ? capacity::Phase::optimizer_done : capacity::Phase::stage_a);
+      ++diagnostics_->capacity_checkpoints;
+      diagnostics_->minimum_free = diagnostics_->minimum_free ?
+        std::min(diagnostics_->minimum_free, free) : free;
+      const auto increment = capacity::increment(diagnostics_->free_before, free);
+      diagnostics_->maximum_pool_increment = std::max(diagnostics_->maximum_pool_increment, increment);
+      if (phase == capacity::Phase::creation) {
+        diagnostics_->creation_increment = increment;
+        l3_creation_checked_ = true;
+      } else if (phase == capacity::Phase::optimizer_done) {
+        diagnostics_->free_after_optimizer = free;
+        diagnostics_->optimizer_growth = capacity::increment(diagnostics_->free_after, free);
+        diagnostics_->optimizer_total_increment = increment;
+      } else {
+        ++diagnostics_->stage_a_capacity_checkpoints;
+        diagnostics_->stage_a_maximum_increment = std::max(diagnostics_->stage_a_maximum_increment, increment);
+      }
+      require(capacity::accepted(phase, diagnostics_->free_before, diagnostics_->free_after, free),
+              "L3 optimizer slots exceeded the split raw capacity contract");
+    } else if constexpr (Policy::level == 4 || Policy::level == 6) {
+      std::size_t free = 0, total = 0;
+      check_one_call_cuda(cudaMemGetInfo(&free, &total), "optimizer slot joint memory");
       diagnostics_->minimum_free = diagnostics_->minimum_free ?
         std::min(diagnostics_->minimum_free, free) : free;
       if (pool_increment) {
@@ -5140,7 +5202,7 @@ class OptimizerSlotPool : public OptimizerSlotStageA {
       }
       require(free >= 2ULL * 1024 * 1024 * 1024 &&
                 diagnostics_->maximum_pool_increment <= 1024ULL * 1024 * 1024,
-              "L4 slots exceeded the qualified memory budget");
+              "optimizer slots exceeded the qualified memory budget");
     }
   }
   void close_noexcept() noexcept {
@@ -5155,6 +5217,7 @@ class OptimizerSlotPool : public OptimizerSlotStageA {
   const std::vector<typename Policy::Geometry>& geometry_;
   OptimizerSlotDiagnostics* diagnostics_;
   int device_ = -1;
+  bool l3_creation_checked_ = false;
   std::vector<std::shared_ptr<MultiPenaltyGcvCapacityPrepared>> slots_;
   std::vector<cudaEvent_t> events_;
 };
@@ -5600,7 +5663,11 @@ void prefill_optimizer_slot_target_states(
     const Rcpp::NumericMatrix& data, const LayerPlan& plan,
     const std::vector<SinglePenaltyPrefillGroup>& groups,
     ExactPrimaryCoefficientArena* arena, OneCallDiagnostics* diagnostics) {
-  auto& d = Policy::level == 4 ? diagnostics->l4_slots : diagnostics->l5_slots;
+  static_assert(Policy::level == 3 || Policy::level == 4 || Policy::level == 5 || Policy::level == 6,
+                "unqualified optimizer slot level");
+  auto& d = Policy::level == 3 ? diagnostics->l3_slots :
+    (Policy::level == 4 ? diagnostics->l4_slots :
+      (Policy::level == 5 ? diagnostics->l5_slots : diagnostics->l6_slots));
   require(plan.level == Policy::level && arena && arena->enabled() && d.enabled,
           "optimizer slot prefill configuration changed");
   PrefillBatchDiagnostic batch;
@@ -5631,8 +5698,8 @@ void prefill_optimizer_slot_target_states(
   MultiPenaltyGcvCapacityMultiResult optimization;
   optimization.setups.resize(work.requests.size());
   auto& md = optimization.diagnostics;
-  md.schema_version = Policy::level == 4 ? "full-cuda-ci-l4-slot-optimizer-v1" : "full-cuda-ci-l5-slot-optimizer-v1";
-  md.execution_strategy = Policy::level == 4 ? "original-order-l4-32-reusable-slots" : "original-order-l5-32-reusable-slots";
+  md.schema_version = "full-cuda-ci-l" + std::to_string(Policy::level) + "-slot-optimizer-v1";
+  md.execution_strategy = "original-order-l" + std::to_string(Policy::level) + "-32-reusable-slots";
   md.setup_count = static_cast<int>(work.requests.size());
   md.target_count = static_cast<int>(targets);
   md.requested_concurrency = md.worker_count = md.setup_stream_count = pool.size();
@@ -5738,17 +5805,23 @@ void prefill_multi_penalty_level_target_states(
   std::vector<SinglePenaltyPrefillGroup> window;
   window.reserve(
     static_cast<std::size_t>(kMultiPenaltyGcvMaximumConcurrentSetups));
-  if ((diagnostics->l4_slots.enabled && plan.level == 4) ||
-      (diagnostics->l5_slots.enabled && plan.level == 5)) {
+  if ((diagnostics->l3_slots.enabled && plan.level == 3) ||
+      (diagnostics->l4_slots.enabled && plan.level == 4) ||
+      (diagnostics->l5_slots.enabled && plan.level == 5) ||
+      (diagnostics->l6_slots.enabled && plan.level == 6)) {
     for (const auto& entry : tasks_by_conditioning) {
       require(!entry.second.empty(), "slot conditioning group is empty");
       const auto& task = plan.tasks[static_cast<std::size_t>(entry.second.front())];
       window.push_back(SinglePenaltyPrefillGroup{setup_cache->get(task.conditioning_set), entry.second});
     }
-    if (plan.level == 4) {
+    if (plan.level == 3) {
+      prefill_optimizer_slot_target_states<L3OptimizerSlotPolicy>(data, plan, window, coefficient_arena, diagnostics);
+    } else if (plan.level == 4) {
       prefill_optimizer_slot_target_states<L4OptimizerSlotPolicy>(data, plan, window, coefficient_arena, diagnostics);
-    } else {
+    } else if (plan.level == 5) {
       prefill_optimizer_slot_target_states<L5OptimizerSlotPolicy>(data, plan, window, coefficient_arena, diagnostics);
+    } else {
+      prefill_optimizer_slot_target_states<L6OptimizerSlotPolicy>(data, plan, window, coefficient_arena, diagnostics);
     }
     return;
   }
@@ -6980,6 +7053,7 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
     bool compatible_cuda_strict,
     const FullCudaCiOneCallMethodOptions& method_options) {
   const auto run_started = std::chrono::steady_clock::now();
+  const auto structured_before = structured_component_execution_counts();
   const int n = data.nrow();
   const int p = data.ncol();
   require(compatible_cuda_strict,
@@ -7113,6 +7187,28 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
   diagnostics.l4_optimizer_workers32_enabled =
     level_component_flag("FASTKPC_DCC_GAMMA_L4_OPTIMIZER_WORKERS32");
   diagnostics.l4_slots.enabled = level_component_flag("FASTKPC_DCC_GAMMA_L4_OPTIMIZER_SLOTS");
+  diagnostics.l6_slots.enabled = level_component_flag("FASTKPC_DCC_GAMMA_L6_OPTIMIZER_SLOTS");
+  diagnostics.l3_slots.enabled = level_component_flag("FASTKPC_DCC_GAMMA_L3_OPTIMIZER_SLOTS");
+  require(!diagnostics.l3_slots.enabled ||
+            (method_options.ci_method == "dcc.gamma" && n == 351 && p == 48 &&
+             diagnostics.l4_slots.enabled && diagnostics.l5_slots.enabled && diagnostics.l6_slots.enabled &&
+             level_component_flag("FASTKPC_CUDA_DEVICE_PROPERTIES_CACHE") &&
+             diagnostics.l2_component_prefill_enabled &&
+             diagnostics.exact_primary_fixed_reuse_requested &&
+             !diagnostics.setup_optimizer_pipeline_enabled &&
+             diagnostics.cuda_multi_penalty_decomposition_trace_capacity_per_target == 0 &&
+             level_component_flag("FASTKPC_MULTI_PENALTY_STATUS_WAIT_BEFORE_D2H")),
+          "L3 optimizer slots require canonical S2, L4/L5/L6 slots, properties cache, exact-primary reuse, status wait and original setup scheduling");
+  require(!diagnostics.l6_slots.enabled ||
+            (method_options.ci_method == "dcc.gamma" && n == 351 && p == 48 &&
+             diagnostics.l4_slots.enabled && diagnostics.l5_slots.enabled &&
+             level_component_flag("FASTKPC_CUDA_DEVICE_PROPERTIES_CACHE") &&
+             diagnostics.l2_component_prefill_enabled &&
+             diagnostics.exact_primary_fixed_reuse_requested &&
+             !diagnostics.setup_optimizer_pipeline_enabled &&
+             diagnostics.cuda_multi_penalty_decomposition_trace_capacity_per_target == 0 &&
+             level_component_flag("FASTKPC_MULTI_PENALTY_STATUS_WAIT_BEFORE_D2H")),
+          "L6 optimizer slots require canonical S2, L4/L5 slots, properties cache, exact-primary reuse, status wait and original setup scheduling");
   require(!diagnostics.l4_slots.enabled ||
             (method_options.ci_method == "dcc.gamma" && n == 351 && p == 48 &&
              diagnostics.l4_optimizer_workers32_enabled &&
@@ -8572,6 +8668,11 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
 
   const DecompositionReuseAggregate& decomposition_reuse =
     diagnostics.cuda_multi_penalty_decomposition_reuse;
+  require(diagnostics.l3_slots.created == diagnostics.l3_slots.destroyed &&
+            diagnostics.l3_slots.optimizer_binds == diagnostics.l3_slots.detached &&
+            diagnostics.l3_slots.stage_a_binds == diagnostics.l3_slots.detached &&
+            (diagnostics.l3_slots.enabled || diagnostics.l3_slots.created == 0),
+          "L3 optimizer slot lifecycle failed closed");
   require(diagnostics.l4_slots.created == diagnostics.l4_slots.destroyed &&
             diagnostics.l4_slots.optimizer_binds == diagnostics.l4_slots.detached &&
             diagnostics.l4_slots.stage_a_binds == diagnostics.l4_slots.detached &&
@@ -8582,6 +8683,11 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
             diagnostics.l5_slots.stage_a_binds == diagnostics.l5_slots.detached &&
             (diagnostics.l5_slots.enabled || diagnostics.l5_slots.created == 0),
           "L5 optimizer slot lifecycle failed closed");
+  require(diagnostics.l6_slots.created == diagnostics.l6_slots.destroyed &&
+            diagnostics.l6_slots.optimizer_binds == diagnostics.l6_slots.detached &&
+            diagnostics.l6_slots.stage_a_binds == diagnostics.l6_slots.detached &&
+            (diagnostics.l6_slots.enabled || diagnostics.l6_slots.created == 0),
+          "L6 optimizer slot lifecycle failed closed");
   const bool decomposition_trace_enabled =
     diagnostics.cuda_multi_penalty_decomposition_trace_capacity_per_target >
       0;
@@ -8766,6 +8872,17 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
   const Rcpp::DataFrame exact_primary_fixed_reuse_key_trace =
     exact_primary_fixed_reuse_key_frame(diagnostics, n);
 
+  const auto structured_after = structured_component_execution_counts();
+  Rcpp::List structured_execution(2);
+  structured_execution.names() = Rcpp::CharacterVector::create("original", "fixed_vt_work_pair");
+  for (int m = 0; m < 2; ++m) {
+    structured_execution[m] = Rcpp::List::create(
+      Rcpp::Named("created") = static_cast<double>(structured_after.created[m]-structured_before.created[m]),
+      Rcpp::Named("destroyed_before_return") = static_cast<double>(structured_after.destroyed[m]-structured_before.destroyed[m]),
+      Rcpp::Named("submissions") = static_cast<double>(structured_after.submissions[m]-structured_before.submissions[m]),
+      Rcpp::Named("targets") = static_cast<double>(structured_after.targets[m]-structured_before.targets[m]));
+  }
+
   return Rcpp::List::create(
     Rcpp::Named("adjacency") = adjacency_matrix(adjacency, p),
     Rcpp::Named("sepsets") = sepset_list(sepsets),
@@ -8782,6 +8899,36 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
       exact_primary_fixed_reuse_key_trace,
     Rcpp::Named("summary") = Rcpp::List::create(
       Rcpp::Named("l4_optimizer_workers32_enabled") = diagnostics.l4_optimizer_workers32_enabled,
+      Rcpp::Named("l3_optimizer_slots") = Rcpp::List::create(
+        Rcpp::Named("enabled") = diagnostics.l3_slots.enabled,
+        Rcpp::Named("layers") = diagnostics.l3_slots.layers,
+        Rcpp::Named("setups") = diagnostics.l3_slots.setups,
+        Rcpp::Named("targets") = diagnostics.l3_slots.targets,
+        Rcpp::Named("created") = diagnostics.l3_slots.created,
+        Rcpp::Named("destroyed") = diagnostics.l3_slots.destroyed,
+        Rcpp::Named("optimizer_binds") = diagnostics.l3_slots.optimizer_binds,
+        Rcpp::Named("stage_a_binds") = diagnostics.l3_slots.stage_a_binds,
+        Rcpp::Named("detached") = diagnostics.l3_slots.detached,
+        Rcpp::Named("peak_workers") = diagnostics.l3_slots.peak_workers,
+        Rcpp::Named("free_before_create") = static_cast<double>(diagnostics.l3_slots.free_before),
+        Rcpp::Named("free_after_create") = static_cast<double>(diagnostics.l3_slots.free_after),
+        Rcpp::Named("free_after_optimizer") = static_cast<double>(diagnostics.l3_slots.free_after_optimizer),
+        Rcpp::Named("minimum_free_bytes") = static_cast<double>(diagnostics.l3_slots.minimum_free),
+        Rcpp::Named("maximum_raw_increment_bytes") = static_cast<double>(diagnostics.l3_slots.maximum_pool_increment),
+        Rcpp::Named("creation_increment_bytes") = static_cast<double>(diagnostics.l3_slots.creation_increment),
+        Rcpp::Named("optimizer_growth_bytes") = static_cast<double>(diagnostics.l3_slots.optimizer_growth),
+        Rcpp::Named("optimizer_total_increment_bytes") = static_cast<double>(diagnostics.l3_slots.optimizer_total_increment),
+        Rcpp::Named("stage_a_maximum_increment_bytes") = static_cast<double>(diagnostics.l3_slots.stage_a_maximum_increment),
+        Rcpp::Named("capacity_checkpoints") = diagnostics.l3_slots.capacity_checkpoints,
+        Rcpp::Named("stage_a_capacity_checkpoints") = diagnostics.l3_slots.stage_a_capacity_checkpoints,
+        Rcpp::Named("capacity_coverage") = "creation, optimizer completion, each Stage A setup entry and before close; no continuous sampler",
+        Rcpp::Named("prepare_ms") = diagnostics.l3_slots.prepare_ms,
+        Rcpp::Named("pool_create_ms") = diagnostics.l3_slots.pool_create_ms,
+        Rcpp::Named("work_ms") = diagnostics.l3_slots.work_ms,
+        Rcpp::Named("destroy_ms") = diagnostics.l3_slots.destroy_ms,
+        Rcpp::Named("bind_sum_ms") = diagnostics.l3_slots.bind_sum_ms,
+        Rcpp::Named("detach_sum_ms") = diagnostics.l3_slots.detach_sum_ms,
+        Rcpp::Named("stage_a_bind_ms") = diagnostics.l3_slots.stage_a_bind_ms),
       Rcpp::Named("l4_optimizer_slots") = Rcpp::List::create(
         Rcpp::Named("enabled") = diagnostics.l4_slots.enabled,
         Rcpp::Named("layers") = diagnostics.l4_slots.layers,
@@ -8803,6 +8950,27 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
         Rcpp::Named("bind_sum_ms") = diagnostics.l4_slots.bind_sum_ms,
         Rcpp::Named("detach_sum_ms") = diagnostics.l4_slots.detach_sum_ms,
         Rcpp::Named("stage_a_bind_ms") = diagnostics.l4_slots.stage_a_bind_ms),
+      Rcpp::Named("l6_optimizer_slots") = Rcpp::List::create(
+        Rcpp::Named("enabled") = diagnostics.l6_slots.enabled,
+        Rcpp::Named("layers") = diagnostics.l6_slots.layers,
+        Rcpp::Named("setups") = diagnostics.l6_slots.setups,
+        Rcpp::Named("targets") = diagnostics.l6_slots.targets,
+        Rcpp::Named("created") = diagnostics.l6_slots.created,
+        Rcpp::Named("destroyed") = diagnostics.l6_slots.destroyed,
+        Rcpp::Named("optimizer_binds") = diagnostics.l6_slots.optimizer_binds,
+        Rcpp::Named("stage_a_binds") = diagnostics.l6_slots.stage_a_binds,
+        Rcpp::Named("detached") = diagnostics.l6_slots.detached,
+        Rcpp::Named("peak_workers") = diagnostics.l6_slots.peak_workers,
+        Rcpp::Named("free_before_create") = static_cast<double>(diagnostics.l6_slots.free_before),
+        Rcpp::Named("free_after_create") = static_cast<double>(diagnostics.l6_slots.free_after),
+        Rcpp::Named("minimum_free_bytes") = static_cast<double>(diagnostics.l6_slots.minimum_free),
+        Rcpp::Named("maximum_pool_increment_bytes") = static_cast<double>(diagnostics.l6_slots.maximum_pool_increment),
+        Rcpp::Named("prepare_ms") = diagnostics.l6_slots.prepare_ms,
+        Rcpp::Named("work_ms") = diagnostics.l6_slots.work_ms,
+        Rcpp::Named("destroy_ms") = diagnostics.l6_slots.destroy_ms,
+        Rcpp::Named("bind_sum_ms") = diagnostics.l6_slots.bind_sum_ms,
+        Rcpp::Named("detach_sum_ms") = diagnostics.l6_slots.detach_sum_ms,
+        Rcpp::Named("stage_a_bind_ms") = diagnostics.l6_slots.stage_a_bind_ms),
       Rcpp::Named("l5_optimizer_slots") = Rcpp::List::create(
         Rcpp::Named("enabled") = diagnostics.l5_slots.enabled,
         Rcpp::Named("layers") = diagnostics.l5_slots.layers,
@@ -8824,6 +8992,7 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
         Rcpp::Named("stage_a_bind_ms") = diagnostics.l5_slots.stage_a_bind_ms),
       Rcpp::Named("level_component_prefill_enabled") = diagnostics.level_component_prefill_enabled,
       Rcpp::Named("structured_component_prefill_enabled") = diagnostics.structured_component_prefill_enabled,
+      Rcpp::Named("structured_execution") = structured_execution,
       Rcpp::Named("l2_component_prefill_enabled") = diagnostics.l2_component_prefill_enabled,
       Rcpp::Named("level_component_consumers") = level_consumer_rows,
       Rcpp::Named("l2_component_input_host_ms") = diagnostics.l2_component_input_host_ms,

@@ -1,4 +1,5 @@
 #include "mgcv_single_penalty_gcv.hpp"
+#include "cuda_device_properties.hpp"
 #include "mgcv_fixed_sp_runtime_types.hpp"
 #include "lapack_312_small_dgesdd.cuh"
 #include "third_party/glibc_2_35_exp_fma.cuh"
@@ -1961,7 +1962,7 @@ SinglePenaltyGcvCudaResult single_penalty_gcv_cuda(
   check_cuda(cudaGetDevice(&diagnostics.device_id),
              "query single-penalty GCV CUDA device");
   cudaDeviceProp properties;
-  check_cuda(cudaGetDeviceProperties(&properties, diagnostics.device_id),
+  check_cuda(fastkpc_cuda_get_device_properties(&properties, diagnostics.device_id),
              "query single-penalty GCV GPU properties");
   diagnostics.gpu_name = properties.name;
 

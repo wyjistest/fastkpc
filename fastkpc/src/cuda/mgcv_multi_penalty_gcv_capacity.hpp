@@ -4,6 +4,8 @@
 #include "mgcv_multi_penalty_gcv.hpp"
 #include "mgcv_multi_penalty_gcv_l5.hpp"
 #include "mgcv_multi_penalty_gcv_l4.hpp"
+#include "mgcv_multi_penalty_gcv_l6.hpp"
+#include "mgcv_multi_penalty_gcv_l3.hpp"
 
 #include <memory>
 #include <string>
@@ -42,6 +44,28 @@ void rebind_multi_penalty_gcv_capacity_l4_slot(
     const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& prepared,
     const MultiPenaltyGcvL4Geometry& geometry);
 void drain_multi_penalty_gcv_capacity_l4_slot(
+    const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& prepared);
+
+// Default-off L6 experiment: capacity five, original two/three/five-target cohorts.
+// Drain and discard after any failed rebind; a live lease forbids reuse.
+std::shared_ptr<MultiPenaltyGcvCapacityPrepared>
+create_multi_penalty_gcv_capacity_l6_slot(
+    const MultiPenaltyGcvL6Geometry& geometry, int device_id);
+void rebind_multi_penalty_gcv_capacity_l6_slot(
+    const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& prepared,
+    const MultiPenaltyGcvL6Geometry& geometry);
+void drain_multi_penalty_gcv_capacity_l6_slot(
+    const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& prepared);
+
+// Default-off L3 experiment: capacity 33, original unpadded cohorts 2 through 33.
+// Drain and discard after any failed rebind; a live lease forbids reuse.
+std::shared_ptr<MultiPenaltyGcvCapacityPrepared>
+create_multi_penalty_gcv_capacity_l3_slot(
+    const MultiPenaltyGcvL3Geometry& geometry, int device_id);
+void rebind_multi_penalty_gcv_capacity_l3_slot(
+    const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& prepared,
+    const MultiPenaltyGcvL3Geometry& geometry);
+void drain_multi_penalty_gcv_capacity_l3_slot(
     const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& prepared);
 
 struct MultiPenaltyGcvCapacityRequest {

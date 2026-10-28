@@ -1,10 +1,79 @@
 #include "cuda_status.hpp"
+#include "cuda_device_properties.hpp"
 #include "mgcv_fixed_sp_runtime_types.hpp"
 
 #include <cuda_runtime.h>
+#include <atomic>
+#include <cstdlib>
+#include <cstring>
 #include <iomanip>
+#include <map>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
+
+namespace {
+bool device_properties_cache_enabled() {
+  const char* value = std::getenv("FASTKPC_CUDA_DEVICE_PROPERTIES_CACHE");
+  if (value == nullptr || value[0] == '\0' || std::strcmp(value, "0") == 0)
+    return false;
+  if (std::strcmp(value, "1") == 0) return true;
+  throw std::runtime_error(
+    "FASTKPC_CUDA_DEVICE_PROPERTIES_CACHE must be 0 or 1");
+}
+
+struct DevicePropertiesCache {
+  const bool enabled = device_properties_cache_enabled();
+  std::mutex mutex;
+  std::map<int, cudaDeviceProp> properties;
+  std::atomic<std::uint64_t> requests{0}, queries{0}, failures{0}, hits{0}, entries{0};
+
+  cudaError_t query(cudaDeviceProp* output, int device) {
+    queries.fetch_add(1, std::memory_order_relaxed);
+    const cudaError_t err = cudaGetDeviceProperties(output, device);
+    if (err != cudaSuccess) failures.fetch_add(1, std::memory_order_relaxed);
+    return err;
+  }
+};
+
+DevicePropertiesCache& device_properties_cache() {
+  static DevicePropertiesCache cache;
+  return cache;
+}
+}  // namespace
+
+cudaError_t fastkpc_cuda_get_device_properties(cudaDeviceProp* properties,
+                                             int device) {
+  auto& cache = device_properties_cache();
+  cache.requests.fetch_add(1, std::memory_order_relaxed);
+  if (!cache.enabled || properties == nullptr || device < 0)
+    return cache.query(properties, device);
+
+  // Serialize first access as well as publication: concurrent capacity backends
+  // issue at most one successful query per logical device. Failures are retried.
+  std::lock_guard<std::mutex> lock(cache.mutex);
+  const auto found = cache.properties.find(device);
+  if (found != cache.properties.end()) {
+    *properties = found->second;
+    cache.hits.fetch_add(1, std::memory_order_relaxed);
+    return cudaSuccess;
+  }
+  const cudaError_t err = cache.query(properties, device);
+  if (err == cudaSuccess) {
+    cache.properties.emplace(device, *properties);
+    cache.entries.fetch_add(1, std::memory_order_relaxed);
+  }
+  return err;
+}
+
+CudaDevicePropertiesCacheStats fastkpc_cuda_device_properties_cache_stats() {
+  auto& cache = device_properties_cache();
+  return {cache.enabled, cache.requests.load(std::memory_order_relaxed),
+          cache.queries.load(std::memory_order_relaxed),
+          cache.failures.load(std::memory_order_relaxed),
+          cache.hits.load(std::memory_order_relaxed),
+          cache.entries.load(std::memory_order_relaxed)};
+}
 
 bool fastkpc_cuda_available(std::string* error_message) {
   cudaError_t err = cudaFree(0);
@@ -37,7 +106,7 @@ CudaDeviceInfo fastkpc_cuda_device_info() {
                              cudaGetErrorString(err));
   }
   cudaDeviceProp prop;
-  err = cudaGetDeviceProperties(&prop, device);
+  err = fastkpc_cuda_get_device_properties(&prop, device);
   if (err != cudaSuccess) {
     throw std::runtime_error(std::string("cudaGetDeviceProperties failed: ") +
                              cudaGetErrorString(err));
@@ -67,7 +136,7 @@ CudaPhase3EnvironmentIdentity fastkpc_cuda_phase3_environment_identity(
   }
 
   cudaDeviceProp properties;
-  err = cudaGetDeviceProperties(&properties, device_id);
+  err = fastkpc_cuda_get_device_properties(&properties, device_id);
   if (err != cudaSuccess) {
     throw std::runtime_error(
       std::string("CUDA static device properties query failed: ") +

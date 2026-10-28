@@ -36,6 +36,8 @@
 
 #include "mgcv_multi_penalty_gcv_l5.hpp"
 #include "mgcv_multi_penalty_gcv_l4.hpp"
+#include "mgcv_multi_penalty_gcv_l6.hpp"
+#include "mgcv_multi_penalty_gcv_l3.hpp"
 
 namespace fastkpc {
 
@@ -126,6 +128,94 @@ void drain_multi_penalty_gcv_cuda_prepared_l4(
   std::lock_guard<std::mutex> lock(prepared->mutex);
   check_cuda(cudaSetDevice(prepared->device_id), "select L4 slot drain device");
   check_cuda(cudaStreamSynchronize(prepared->stream.get()), "drain L4 slot");
+}
+
+void rebind_multi_penalty_gcv_cuda_prepared_l6(
+    const std::shared_ptr<MultiPenaltyGcvCudaPreparedsmall64>& prepared,
+    const MultiPenaltyGcvL6Geometry& g) {
+  if (!prepared) throw std::runtime_error("L6 slot was released");
+  validate_multi_penalty_gcv_l6_geometry(g);
+  std::lock_guard<std::mutex> lock(prepared->mutex);
+  auto& p = *prepared;
+  if (p.residual_slot_leased) throw std::runtime_error("L6 slot output is leased");
+  if (p.n != g.n || p.q != g.q || p.penalty_count != g.penalty_count ||
+      p.target_capacity != 5 || g.roots.size() > p.d_roots.count()) {
+    throw std::runtime_error("L6 slot shape or root capacity changed");
+  }
+  check_cuda(cudaSetDevice(p.device_id), "select L6 slot device");
+  // The caller owns the packet through optimize/finalize and failure drain.
+  // No allocation, library handle or stream is created in this operation.
+  MultiPenaltyGcvCudaDiagnostics d;
+  upload_async(&p.d_X, g.X.data(), g.X.size(), p.stream.get(), &d);
+  upload_async(&p.d_qr_packed, g.qr.data(), g.qr.size(), p.stream.get(), &d);
+  upload_async(&p.d_tau, g.tau.data(), g.tau.size(), p.stream.get(), &d);
+  upload_async(&p.d_r, g.r.data(), g.r.size(), p.stream.get(), &d);
+  upload_async(&p.d_pivot, g.pivot.data(), g.pivot.size(), p.stream.get(), &d);
+  upload_async(&p.d_roots, g.roots.data(), g.roots.size(), p.stream.get(), &d);
+  upload_async(&p.d_root_offsets, g.offsets.data(), g.offsets.size(), p.stream.get(), &d);
+  upload_async(&p.d_ranks, g.ranks.data(), g.ranks.size(), p.stream.get(), &d);
+  upload_async(&p.d_matrices, g.matrices.data(), g.matrices.size(), p.stream.get(), &d);
+  upload_async(&p.d_initial_log_sp, g.initial_log_sp.data(), g.initial_log_sp.size(), p.stream.get(), &d);
+  p.initial_log_sp = g.initial_log_sp;
+  p.total_root_rank = g.offsets.back() + g.ranks.back();
+  ++p.generation;
+  p.info.generation = p.generation;
+  ++p.info.setup_upload_count;
+  p.info.setup_h2d_bytes += (g.X.size() + g.qr.size() + g.tau.size() +
+    g.r.size() + g.roots.size() + g.matrices.size() + g.initial_log_sp.size()) * sizeof(double) +
+    (g.pivot.size() + g.ranks.size() + g.offsets.size()) * sizeof(int);
+}
+
+void drain_multi_penalty_gcv_cuda_prepared_l6(
+    const std::shared_ptr<MultiPenaltyGcvCudaPreparedsmall64>& prepared) {
+  if (!prepared) throw std::runtime_error("L6 slot was released");
+  std::lock_guard<std::mutex> lock(prepared->mutex);
+  check_cuda(cudaSetDevice(prepared->device_id), "select L6 slot drain device");
+  check_cuda(cudaStreamSynchronize(prepared->stream.get()), "drain L6 slot");
+}
+
+void rebind_multi_penalty_gcv_cuda_prepared_l3(
+    const std::shared_ptr<MultiPenaltyGcvCudaPreparedsmall64>& prepared,
+    const MultiPenaltyGcvL3Geometry& g) {
+  if (!prepared) throw std::runtime_error("L3 slot was released");
+  validate_multi_penalty_gcv_l3_geometry(g);
+  std::lock_guard<std::mutex> lock(prepared->mutex);
+  auto& p = *prepared;
+  if (p.residual_slot_leased) throw std::runtime_error("L3 slot output is leased");
+  if (p.n != g.n || p.q != g.q || p.penalty_count != g.penalty_count ||
+      p.target_capacity != 33 || g.roots.size() > p.d_roots.count()) {
+    throw std::runtime_error("L3 slot shape or root capacity changed");
+  }
+  check_cuda(cudaSetDevice(p.device_id), "select L3 slot device");
+  // The caller owns the packet through optimize/finalize and failure drain.
+  // No allocation, library handle or stream is created in this operation.
+  MultiPenaltyGcvCudaDiagnostics d;
+  upload_async(&p.d_X, g.X.data(), g.X.size(), p.stream.get(), &d);
+  upload_async(&p.d_qr_packed, g.qr.data(), g.qr.size(), p.stream.get(), &d);
+  upload_async(&p.d_tau, g.tau.data(), g.tau.size(), p.stream.get(), &d);
+  upload_async(&p.d_r, g.r.data(), g.r.size(), p.stream.get(), &d);
+  upload_async(&p.d_pivot, g.pivot.data(), g.pivot.size(), p.stream.get(), &d);
+  upload_async(&p.d_roots, g.roots.data(), g.roots.size(), p.stream.get(), &d);
+  upload_async(&p.d_root_offsets, g.offsets.data(), g.offsets.size(), p.stream.get(), &d);
+  upload_async(&p.d_ranks, g.ranks.data(), g.ranks.size(), p.stream.get(), &d);
+  upload_async(&p.d_matrices, g.matrices.data(), g.matrices.size(), p.stream.get(), &d);
+  upload_async(&p.d_initial_log_sp, g.initial_log_sp.data(), g.initial_log_sp.size(), p.stream.get(), &d);
+  p.initial_log_sp = g.initial_log_sp;
+  p.total_root_rank = g.offsets.back() + g.ranks.back();
+  ++p.generation;
+  p.info.generation = p.generation;
+  ++p.info.setup_upload_count;
+  p.info.setup_h2d_bytes += (g.X.size() + g.qr.size() + g.tau.size() +
+    g.r.size() + g.roots.size() + g.matrices.size() + g.initial_log_sp.size()) * sizeof(double) +
+    (g.pivot.size() + g.ranks.size() + g.offsets.size()) * sizeof(int);
+}
+
+void drain_multi_penalty_gcv_cuda_prepared_l3(
+    const std::shared_ptr<MultiPenaltyGcvCudaPreparedsmall64>& prepared) {
+  if (!prepared) throw std::runtime_error("L3 slot was released");
+  std::lock_guard<std::mutex> lock(prepared->mutex);
+  check_cuda(cudaSetDevice(prepared->device_id), "select L3 slot drain device");
+  check_cuda(cudaStreamSynchronize(prepared->stream.get()), "drain L3 slot");
 }
 
 }  // namespace fastkpc
