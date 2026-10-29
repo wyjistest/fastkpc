@@ -1,0 +1,239 @@
+{
+  "status": "PASS",
+  "cuobjdump": "Build cuda_12.5.r12.5/compiler.34165569_0",
+  "old_native": {
+    "path": "/data/wenyujianData/kpcalg/fastkpc/artifacts/full_cuda_ci/optimizer_postback_runtime_20261029/baseline/fastkpc_cuda.so",
+    "sha256": "12acc3cd01cce2dcac5f2bfb5ec02f27056e92154cbab2534c7f03bdc22caa7d",
+    "cubins": {
+      "fastkpc_cuda.1.sm_89.cubin": {
+        "sha256": "6c29fca16e24451542cc2863c2f8fd8145f9b7608fb8bee952bfd59f951bc80a",
+        "bytes": 48416
+      },
+      "fastkpc_cuda.10.sm_89.cubin": {
+        "sha256": "f7edc2b1f053b718f7464be0cdfe6c6cb0bdc3b60ea08d347b47d3d465251373",
+        "bytes": 89248
+      },
+      "fastkpc_cuda.11.sm_89.cubin": {
+        "sha256": "580e321680d41460416e9151957a0090ccbda711c765e083eb5339aacc9b817f",
+        "bytes": 9612280
+      },
+      "fastkpc_cuda.12.sm_89.cubin": {
+        "sha256": "e00b6b4bc948e869a4eb24c7c970c32e52dd01f91aa63e70f410210e05a5278d",
+        "bytes": 19051080
+      },
+      "fastkpc_cuda.13.sm_89.cubin": {
+        "sha256": "ab53a0dda367bdb6886845c142a2653d280d53107186220310b5831534d6f529",
+        "bytes": 13051848
+      },
+      "fastkpc_cuda.14.sm_89.cubin": {
+        "sha256": "39baecb99491c26c275ad69e11e68b046666b1f5a3ef875e15fa94482fa2b9e3",
+        "bytes": 19101128
+      },
+      "fastkpc_cuda.15.sm_89.cubin": {
+        "sha256": "72b5cd4942a4e42961b68e9e8acac5719cd57e7fd6988ed7f682b8226830cf82",
+        "bytes": 13277640
+      },
+      "fastkpc_cuda.16.sm_89.cubin": {
+        "sha256": "0e8f08b7ea85eab91f20e793544a23bd6c58b8bb977aa7d8c4a85d00377094c4",
+        "bytes": 13525448
+      },
+      "fastkpc_cuda.17.sm_89.cubin": {
+        "sha256": "42528bb3a8b4f97f77ce27895414b6e793e41101141e67ff536aa9a113331f8c",
+        "bytes": 960
+      },
+      "fastkpc_cuda.2.sm_89.cubin": {
+        "sha256": "d8fb161ed0ce43c0d606499f600053c82f80c55b274999a52cf63252f8ac0056",
+        "bytes": 196512
+      },
+      "fastkpc_cuda.3.sm_89.cubin": {
+        "sha256": "c39d2b23769352413e6cd212aca8dd3171cae2239b5953c16372b4dacc7ed387",
+        "bytes": 390336
+      },
+      "fastkpc_cuda.4.sm_89.cubin": {
+        "sha256": "6ef517de24a74938601993a9a144f29ee14e4f9a1091215a40fc81411f6b82ec",
+        "bytes": 176544
+      },
+      "fastkpc_cuda.5.sm_89.cubin": {
+        "sha256": "42528bb3a8b4f97f77ce27895414b6e793e41101141e67ff536aa9a113331f8c",
+        "bytes": 960
+      },
+      "fastkpc_cuda.6.sm_89.cubin": {
+        "sha256": "31170516b457863316675188144b7ff0111c3caaaf1205361061954b9a20937f",
+        "bytes": 25440
+      },
+      "fastkpc_cuda.7.sm_89.cubin": {
+        "sha256": "a91e36386bb2e7267c49f7c74132a514fac71b0b66cbf998b3bd2fb321bf2102",
+        "bytes": 162272
+      },
+      "fastkpc_cuda.8.sm_89.cubin": {
+        "sha256": "cf6238328ab8ea8b48636b9a6b1e21f310b474f91bb62bb7cfbf48dccf76f32e",
+        "bytes": 22624
+      },
+      "fastkpc_cuda.9.sm_89.cubin": {
+        "sha256": "43eeeedcba1247f3e4cecab186ced849ca281c41e3f55c8015c19a576f38b3f5",
+        "bytes": 120352
+      }
+    }
+  },
+  "new_native": {
+    "path": "/data/wenyujianData/kpcalg/fastkpc/build/fastkpc_cuda.so",
+    "sha256": "a1e16a9c0c8089ea90491426c56475394449efb03317be4a87f1925c7b73bd34",
+    "cubins": {
+      "fastkpc_cuda.1.sm_89.cubin": {
+        "sha256": "6c29fca16e24451542cc2863c2f8fd8145f9b7608fb8bee952bfd59f951bc80a",
+        "bytes": 48416
+      },
+      "fastkpc_cuda.10.sm_89.cubin": {
+        "sha256": "f7edc2b1f053b718f7464be0cdfe6c6cb0bdc3b60ea08d347b47d3d465251373",
+        "bytes": 89248
+      },
+      "fastkpc_cuda.11.sm_89.cubin": {
+        "sha256": "43eeeedcba1247f3e4cecab186ced849ca281c41e3f55c8015c19a576f38b3f5",
+        "bytes": 120352
+      },
+      "fastkpc_cuda.12.sm_89.cubin": {
+        "sha256": "e00b6b4bc948e869a4eb24c7c970c32e52dd01f91aa63e70f410210e05a5278d",
+        "bytes": 19051080
+      },
+      "fastkpc_cuda.13.sm_89.cubin": {
+        "sha256": "39baecb99491c26c275ad69e11e68b046666b1f5a3ef875e15fa94482fa2b9e3",
+        "bytes": 19101128
+      },
+      "fastkpc_cuda.14.sm_89.cubin": {
+        "sha256": "72b5cd4942a4e42961b68e9e8acac5719cd57e7fd6988ed7f682b8226830cf82",
+        "bytes": 13277640
+      },
+      "fastkpc_cuda.15.sm_89.cubin": {
+        "sha256": "0e8f08b7ea85eab91f20e793544a23bd6c58b8bb977aa7d8c4a85d00377094c4",
+        "bytes": 13525448
+      },
+      "fastkpc_cuda.16.sm_89.cubin": {
+        "sha256": "ab53a0dda367bdb6886845c142a2653d280d53107186220310b5831534d6f529",
+        "bytes": 13051848
+      },
+      "fastkpc_cuda.17.sm_89.cubin": {
+        "sha256": "580e321680d41460416e9151957a0090ccbda711c765e083eb5339aacc9b817f",
+        "bytes": 9612280
+      },
+      "fastkpc_cuda.18.sm_89.cubin": {
+        "sha256": "acc949892fef5b8ed41788747662aac1804af35005825c654065c4b352bdd4cc",
+        "bytes": 13962320
+      },
+      "fastkpc_cuda.2.sm_89.cubin": {
+        "sha256": "a91e36386bb2e7267c49f7c74132a514fac71b0b66cbf998b3bd2fb321bf2102",
+        "bytes": 162272
+      },
+      "fastkpc_cuda.3.sm_89.cubin": {
+        "sha256": "cf6238328ab8ea8b48636b9a6b1e21f310b474f91bb62bb7cfbf48dccf76f32e",
+        "bytes": 22624
+      },
+      "fastkpc_cuda.4.sm_89.cubin": {
+        "sha256": "6ef517de24a74938601993a9a144f29ee14e4f9a1091215a40fc81411f6b82ec",
+        "bytes": 176544
+      },
+      "fastkpc_cuda.5.sm_89.cubin": {
+        "sha256": "c39d2b23769352413e6cd212aca8dd3171cae2239b5953c16372b4dacc7ed387",
+        "bytes": 390336
+      },
+      "fastkpc_cuda.6.sm_89.cubin": {
+        "sha256": "d8fb161ed0ce43c0d606499f600053c82f80c55b274999a52cf63252f8ac0056",
+        "bytes": 196512
+      },
+      "fastkpc_cuda.7.sm_89.cubin": {
+        "sha256": "31170516b457863316675188144b7ff0111c3caaaf1205361061954b9a20937f",
+        "bytes": 25440
+      },
+      "fastkpc_cuda.8.sm_89.cubin": {
+        "sha256": "42528bb3a8b4f97f77ce27895414b6e793e41101141e67ff536aa9a113331f8c",
+        "bytes": 960
+      },
+      "fastkpc_cuda.9.sm_89.cubin": {
+        "sha256": "42528bb3a8b4f97f77ce27895414b6e793e41101141e67ff536aa9a113331f8c",
+        "bytes": 960
+      }
+    }
+  },
+  "common": 17,
+  "old_only": 0,
+  "new_only": 1,
+  "added": [
+    {
+      "name": "fastkpc_cuda.18.sm_89.cubin",
+      "sha256": "acc949892fef5b8ed41788747662aac1804af35005825c654065c4b352bdd4cc",
+      "bytes": 13962320,
+      "functions": [
+        {
+          "function": "_ZN7fastkpc67_GLOBAL__N__7237e39b_34_mgcv_multi_penalty_gcv_postback_cu_8fe2391844gather_multi_penalty_fixed_evaluation_kernelEPKNS0_22DeviceTargetEvaluationEPdPiii",
+          "registers": 16,
+          "stack": 0
+        },
+        {
+          "function": "_ZN7fastkpc67_GLOBAL__N__7237e39b_34_mgcv_multi_penalty_gcv_postback_cu_8fe2391835form_multi_penalty_residuals_kernelEPKdS2_Pdi",
+          "registers": 12,
+          "stack": 0
+        },
+        {
+          "function": "_ZN7fastkpc67_GLOBAL__N__7237e39b_34_mgcv_multi_penalty_gcv_postback_cu_8fe2391840gather_multi_penalty_coefficients_kernelEPKNS0_20DeviceOptimizerStateEPdii",
+          "registers": 12,
+          "stack": 0
+        },
+        {
+          "function": "_ZN7fastkpc67_GLOBAL__N__7237e39b_34_mgcv_multi_penalty_gcv_postback_cu_8fe2391836merge_stability_replay_states_kernelEPNS0_20DeviceOptimizerStateEPKS1_ib",
+          "registers": 96,
+          "stack": 0
+        },
+        {
+          "function": "_ZN7fastkpc67_GLOBAL__N__7237e39b_34_mgcv_multi_penalty_gcv_postback_cu_8fe2391837optimize_multi_penalty_targets_kernelEPKdPKiS2_S4_S4_S2_S2_S2_S2_PNS0_25DeviceEvaluationWorkspaceEPNS0_20DeviceOptimizerStateEPKS7_iiiiddiiddidbbbbPNS0_30DeviceDecompositionTraceRecordEPjj",
+          "registers": 255,
+          "stack": 7232
+        },
+        {
+          "function": "_ZN7fastkpc67_GLOBAL__N__7237e39b_34_mgcv_multi_penalty_gcv_postback_cu_8fe2391841complete_grouped_prototype_targets_kernelEPKiPKdS2_S2_S4_S4_S4_PNS0_25DeviceEvaluationWorkspaceEPNS0_22DeviceTargetEvaluationEiiiid",
+          "registers": 70,
+          "stack": 0
+        },
+        {
+          "function": "_ZN7fastkpc67_GLOBAL__N__7237e39b_34_mgcv_multi_penalty_gcv_postback_cu_8fe2391847compare_grouped_prototype_decompositions_kernelEPKNS0_25DeviceEvaluationWorkspaceES3_PKNS0_22DeviceTargetEvaluationES6_PKiS8_PNS0_28DeviceGroupedPrototypeParityEii",
+          "registers": 26,
+          "stack": 0
+        },
+        {
+          "function": "_ZN7fastkpc67_GLOBAL__N__7237e39b_34_mgcv_multi_penalty_gcv_postback_cu_8fe2391835grouped_prototype_stable_svd_kernelEPNS0_25DeviceEvaluationWorkspaceEPNS0_22DeviceTargetEvaluationEPKiS6_PKji",
+          "registers": 255,
+          "stack": 112
+        },
+        {
+          "function": "_ZN7fastkpc67_GLOBAL__N__7237e39b_34_mgcv_multi_penalty_gcv_postback_cu_8fe2391835grouped_prototype_guarded_qr_kernelEPNS0_25DeviceEvaluationWorkspaceEPNS0_22DeviceTargetEvaluationEPKiS6_PiPjii",
+          "registers": 78,
+          "stack": 0
+        },
+        {
+          "function": "_ZN7fastkpc67_GLOBAL__N__7237e39b_34_mgcv_multi_penalty_gcv_postback_cu_8fe2391847baseline_grouped_prototype_decomposition_kernelEPNS0_25DeviceEvaluationWorkspaceEPNS0_22DeviceTargetEvaluationEPKiS6_ii",
+          "registers": 255,
+          "stack": 304
+        },
+        {
+          "function": "_ZN7fastkpc67_GLOBAL__N__7237e39b_34_mgcv_multi_penalty_gcv_postback_cu_8fe2391840prepare_grouped_prototype_targets_kernelEPKdS2_S2_PNS0_25DeviceEvaluationWorkspaceEPNS0_22DeviceTargetEvaluationEPiPdiii",
+          "registers": 40,
+          "stack": 0
+        },
+        {
+          "function": "_ZN7fastkpc67_GLOBAL__N__7237e39b_34_mgcv_multi_penalty_gcv_postback_cu_8fe2391837evaluate_multi_penalty_targets_kernelEPKdPKiS2_S4_S4_S2_S2_S2_S2_PNS0_25DeviceEvaluationWorkspaceEPNS0_22DeviceTargetEvaluationEiiiidbb",
+          "registers": 255,
+          "stack": 320
+        },
+        {
+          "function": "_ZN7fastkpc67_GLOBAL__N__7237e39b_34_mgcv_multi_penalty_gcv_postback_cu_8fe2391817magic_qt_y_kernelEPKdS2_S2_PdS3_PNS0_25DeviceEvaluationWorkspaceEiii",
+          "registers": 48,
+          "stack": 0
+        },
+        {
+          "function": "_ZN7fastkpc67_GLOBAL__N__7237e39b_34_mgcv_multi_penalty_gcv_postback_cu_8fe2391826target_squared_norm_kernelEPKdPdii",
+          "registers": 36,
+          "stack": 0
+        }
+      ]
+    }
+  ],
+  "scope": "installed-binary identity only; not clean-rebuild equivalence"
+}

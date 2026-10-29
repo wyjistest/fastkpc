@@ -1,5 +1,9 @@
 # Phase 10 开发交接：properties cache、L3/L6 slots 与 Stage B work pair
 
+后续交接：见 [2026-10-29 vector-postback handoff](PHASE10_DEVELOPMENT_HANDOFF_20261029.md)。
+当前 runtime/工具为 `c469ac5`，accepted opt-in development median 为 290.491 秒。
+本页及原 attestation 保留 10-28 的历史身份；证据仍为 source-closure development。
+
 日期：2026-10-28。本次将已验收的 runtime、验证工具与复核文档收口到 Git。
 当前 accepted opt-in development median 为 **311.440 秒**，对应
 **GO_DEFAULT_OFF_WORK_PAIR_RUNTIME**。新增选项保持默认关闭；Phase 10 **ACTIVE**、
