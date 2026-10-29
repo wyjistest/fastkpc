@@ -37,6 +37,14 @@ python3 -I "$ROOT/tools/generate_recorded_dbdsqr.py" "$BUILD/recorded_dbdsqr.inc
   $COMMON_INC -c "$ROOT/src/cuda/full_cuda_ci_structured_eig.cu" \
   -o "$BUILD/full_cuda_ci_structured_eig.o"
 
+# Separate opt-in object: never add the postback path to the original small64
+# device call graph. Build on incremental paths too, so linked headers cannot
+# silently leave this backend stale. Both backends retain the same FMA policy.
+"$NVCC" -O3 -arch=sm_89 --fmad=false -diag-suppress 2464 \
+  -Xcompiler -fPIC -std=c++17 \
+  $COMMON_INC -c "$ROOT/src/cuda/mgcv_multi_penalty_gcv_postback.cu" \
+  -o "$BUILD/mgcv_multi_penalty_gcv_postback.o"
+
 if [ "${FASTKPC_INCREMENTAL_ONE_CALL_ONLY:-0}" = "1" ]; then
 "$CXX" $COMMON_CXX -c "$ROOT/src/full_cuda_ci_one_call.cpp" \
   -o "$BUILD/full_cuda_ci_one_call.o"
@@ -296,6 +304,7 @@ fi
   "$BUILD/mgcv_single_penalty_gcv.o" \
   "$BUILD/mgcv_multi_penalty_gcv.o" \
   "$BUILD/mgcv_multi_penalty_gcv_small64.o" \
+  "$BUILD/mgcv_multi_penalty_gcv_postback.o" \
   "$BUILD/mgcv_multi_penalty_gcv_ext192.o" \
   "$BUILD/mgcv_multi_penalty_gcv_ext384.o" \
   "$BUILD/mgcv_multi_penalty_gcv_ext559.o" \

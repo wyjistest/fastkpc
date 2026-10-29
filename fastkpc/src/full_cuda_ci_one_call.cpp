@@ -8,6 +8,7 @@
 #include "cuda/full_cuda_ci_structured_eig.hpp"
 #include "cuda/mgcv_fixed_sp_runtime.hpp"
 #include "cuda/mgcv_multi_penalty_gcv_capacity.hpp"
+#include "cuda/mgcv_multi_penalty_gcv_postback.hpp"
 #include "cuda/mgcv_l3_optimizer_slot_capacity.hpp"
 #include "cuda/mgcv_single_penalty_gcv.hpp"
 
@@ -7054,6 +7055,10 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
     const FullCudaCiOneCallMethodOptions& method_options) {
   const auto run_started = std::chrono::steady_clock::now();
   const auto structured_before = structured_component_execution_counts();
+  const bool vector_postback_requested = multi_penalty_gcv_vector_postback_requested();
+  require(!vector_postback_requested || method_options.ci_method == "dcc.gamma",
+          "vector postback is qualified only for dcc.gamma");
+  const auto postback_before = multi_penalty_gcv_postback_execution_counts();
   const int n = data.nrow();
   const int p = data.ncol();
   require(compatible_cuda_strict,
@@ -8873,6 +8878,21 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
     exact_primary_fixed_reuse_key_frame(diagnostics, n);
 
   const auto structured_after = structured_component_execution_counts();
+  const auto postback_after = multi_penalty_gcv_postback_execution_counts();
+  Rcpp::List vector_postback_execution(2);
+  vector_postback_execution.names() = Rcpp::CharacterVector::create("original", "vector");
+  for (int m = 0; m < 2; ++m) {
+    vector_postback_execution[m] = Rcpp::List::create(
+      Rcpp::Named("created") = static_cast<double>(postback_after.created[m] - postback_before.created[m]),
+      Rcpp::Named("destroyed_before_return") = static_cast<double>(postback_after.destroyed[m] - postback_before.destroyed[m]),
+      Rcpp::Named("optimizer_batches") = static_cast<double>(postback_after.optimizer_batches[m] - postback_before.optimizer_batches[m]),
+      Rcpp::Named("optimizer_targets") = static_cast<double>(postback_after.optimizer_targets[m] - postback_before.optimizer_targets[m]),
+      Rcpp::Named("q37_targets") = static_cast<double>(postback_after.q37_targets[m] - postback_before.q37_targets[m]),
+      Rcpp::Named("q46_targets") = static_cast<double>(postback_after.q46_targets[m] - postback_before.q46_targets[m]),
+      Rcpp::Named("other_targets") = static_cast<double>(postback_after.other_targets[m] - postback_before.other_targets[m]),
+      Rcpp::Named("fixed_targets") = static_cast<double>(postback_after.fixed_targets[m] - postback_before.fixed_targets[m]),
+      Rcpp::Named("coefficient_finalization_targets") = static_cast<double>(postback_after.coefficient_finalization_targets[m] - postback_before.coefficient_finalization_targets[m]));
+  }
   Rcpp::List structured_execution(2);
   structured_execution.names() = Rcpp::CharacterVector::create("original", "fixed_vt_work_pair");
   for (int m = 0; m < 2; ++m) {
@@ -8993,6 +9013,8 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
       Rcpp::Named("level_component_prefill_enabled") = diagnostics.level_component_prefill_enabled,
       Rcpp::Named("structured_component_prefill_enabled") = diagnostics.structured_component_prefill_enabled,
       Rcpp::Named("structured_execution") = structured_execution,
+      Rcpp::Named("vector_postback_requested") = vector_postback_requested,
+      Rcpp::Named("vector_postback_execution") = vector_postback_execution,
       Rcpp::Named("l2_component_prefill_enabled") = diagnostics.l2_component_prefill_enabled,
       Rcpp::Named("level_component_consumers") = level_consumer_rows,
       Rcpp::Named("l2_component_input_host_ms") = diagnostics.l2_component_input_host_ms,

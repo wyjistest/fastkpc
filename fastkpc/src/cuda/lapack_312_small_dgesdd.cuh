@@ -527,11 +527,20 @@ __device__ integer dgesdd_bdspac(integer n) {
   return 3 * n * n + 4 * n;
 }
 
+#if defined(FASTKPC_LAPACK_VECTOR_POSTBACK)
+#include "lapack_312_vector_postback.cuh"
+#endif
+
 __device__ integer apply_reference_blocked_q_left(
     integer m, integer n, integer reflector_count,
     doublereal* reflector_matrix, integer reflector_leading_dimension,
     doublereal* tau, doublereal* output, integer output_leading_dimension,
     doublereal* scratch) {
+#if defined(FASTKPC_LAPACK_VECTOR_POSTBACK)
+  if ((n == 37 || n == 46) && m >= n && reflector_count == n)
+    return postback_apply<true>(true, m, n, reflector_matrix,
+      reflector_leading_dimension, tau, output, output_leading_dimension, scratch);
+#endif
   const integer lane = static_cast<integer>(threadIdx.x) & 31;
   integer info = 0;
   if (lane == 0) {
@@ -597,6 +606,11 @@ __device__ integer apply_reference_blocked_p_right_transpose(
     integer reflector_leading_dimension, doublereal* tau,
     doublereal* output, integer output_leading_dimension,
     doublereal* scratch) {
+#if defined(FASTKPC_LAPACK_VECTOR_POSTBACK)
+  if (n == 37 || n == 46)
+    return postback_apply<true>(false, n, n, reflector_matrix,
+      reflector_leading_dimension, tau, output, output_leading_dimension, scratch);
+#endif
   const integer lane = static_cast<integer>(threadIdx.x) & 31;
   integer info = 0;
   if (lane == 0) {

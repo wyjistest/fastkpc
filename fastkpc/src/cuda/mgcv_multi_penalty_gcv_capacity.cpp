@@ -1,8 +1,12 @@
 #include "mgcv_multi_penalty_gcv_capacity.hpp"
 
 #include "mgcv_multi_penalty_gcv_extended.hpp"
+#include "mgcv_multi_penalty_gcv_postback.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 #include <utility>
 #include <variant>
@@ -22,24 +26,76 @@ using CapacityHandle = std::variant<
   std::shared_ptr<MultiPenaltyGcvCudaPrepared>,
   std::shared_ptr<MultiPenaltyGcvCudaPreparedext192>,
   std::shared_ptr<MultiPenaltyGcvCudaPreparedext384>,
-  std::shared_ptr<MultiPenaltyGcvCudaPreparedext559>>;
+  std::shared_ptr<MultiPenaltyGcvCudaPreparedext559>,
+  std::shared_ptr<MultiPenaltyGcvCudaPreparedpostback64>>;
 
 using CapacityResidualHandle = std::variant<
   std::shared_ptr<MultiPenaltyGcvCudaResidualBatchsmall64>,
   std::shared_ptr<MultiPenaltyGcvCudaResidualBatch>,
   std::shared_ptr<MultiPenaltyGcvCudaResidualBatchext192>,
   std::shared_ptr<MultiPenaltyGcvCudaResidualBatchext384>,
-  std::shared_ptr<MultiPenaltyGcvCudaResidualBatchext559>>;
+  std::shared_ptr<MultiPenaltyGcvCudaResidualBatchext559>,
+  std::shared_ptr<MultiPenaltyGcvCudaResidualBatchpostback64>>;
+
+namespace {
+struct PostbackAtomicCounts {
+  std::atomic<std::uint64_t> created[2]{};
+  std::atomic<std::uint64_t> destroyed[2]{};
+  std::atomic<std::uint64_t> optimizer_batches[2]{};
+  std::atomic<std::uint64_t> optimizer_targets[2]{};
+  std::atomic<std::uint64_t> q37_targets[2]{};
+  std::atomic<std::uint64_t> q46_targets[2]{};
+  std::atomic<std::uint64_t> other_targets[2]{};
+  std::atomic<std::uint64_t> fixed_targets[2]{};
+  std::atomic<std::uint64_t> coefficient_finalization_targets[2]{};
+};
+PostbackAtomicCounts postback_counts;
+}  // namespace
+
+bool multi_penalty_gcv_vector_postback_requested() {
+  const char* value = std::getenv("FASTKPC_DCC_GAMMA_VECTOR_POSTBACK");
+  if (!value || !*value || std::strcmp(value, "0") == 0) return false;
+  if (std::strcmp(value, "1") == 0) return true;
+  throw std::runtime_error("FASTKPC_DCC_GAMMA_VECTOR_POSTBACK must be 0 or 1");
+}
+
+MultiPenaltyGcvPostbackExecutionCounts multi_penalty_gcv_postback_execution_counts() {
+  MultiPenaltyGcvPostbackExecutionCounts result;
+  for (int m = 0; m < 2; ++m) {
+    result.created[m] = postback_counts.created[m].load(std::memory_order_relaxed);
+    result.destroyed[m] = postback_counts.destroyed[m].load(std::memory_order_relaxed);
+    result.optimizer_batches[m] = postback_counts.optimizer_batches[m].load(std::memory_order_relaxed);
+    result.optimizer_targets[m] = postback_counts.optimizer_targets[m].load(std::memory_order_relaxed);
+    result.q37_targets[m] = postback_counts.q37_targets[m].load(std::memory_order_relaxed);
+    result.q46_targets[m] = postback_counts.q46_targets[m].load(std::memory_order_relaxed);
+    result.other_targets[m] = postback_counts.other_targets[m].load(std::memory_order_relaxed);
+    result.fixed_targets[m] = postback_counts.fixed_targets[m].load(std::memory_order_relaxed);
+    result.coefficient_finalization_targets[m] = postback_counts.coefficient_finalization_targets[m].load(std::memory_order_relaxed);
+  }
+  return result;
+}
 
 class MultiPenaltyGcvCapacityPrepared {
  public:
   MultiPenaltyGcvCapacityPrepared(
       MultiPenaltyGcvCapacityBucket bucket_value,
-      CapacityHandle handle_value)
-      : bucket(bucket_value), handle(std::move(handle_value)) {}
+      CapacityHandle handle_value, int coefficient_dim)
+      : bucket(bucket_value), handle(std::move(handle_value)), q(coefficient_dim),
+        vector_postback(std::holds_alternative<
+          std::shared_ptr<MultiPenaltyGcvCudaPreparedpostback64>>(handle)) {
+    if (vector_postback && (bucket != MultiPenaltyGcvCapacityBucket::Small64 ||
+                            (q != 37 && q != 46)))
+      throw std::runtime_error("vector-postback backend shape mismatch");
+    postback_counts.created[vector_postback].fetch_add(1, std::memory_order_relaxed);
+  }
+  ~MultiPenaltyGcvCapacityPrepared() {
+    postback_counts.destroyed[vector_postback].fetch_add(1, std::memory_order_relaxed);
+  }
 
-  MultiPenaltyGcvCapacityBucket bucket;
-  CapacityHandle handle;
+  const MultiPenaltyGcvCapacityBucket bucket;
+  const CapacityHandle handle;
+  const int q;
+  const bool vector_postback;
 };
 
 class MultiPenaltyGcvCapacityResidualBatch {
@@ -54,6 +110,19 @@ class MultiPenaltyGcvCapacityResidualBatch {
 };
 
 namespace {
+
+void record_optimizer(const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& p, int targets) {
+  const int m = p->vector_postback;
+  postback_counts.optimizer_batches[m].fetch_add(1, std::memory_order_relaxed);
+  postback_counts.optimizer_targets[m].fetch_add(targets, std::memory_order_relaxed);
+  auto* by_q = p->q == 37 ? postback_counts.q37_targets :
+               p->q == 46 ? postback_counts.q46_targets : postback_counts.other_targets;
+  by_q[m].fetch_add(targets, std::memory_order_relaxed);
+}
+
+bool uses_vector_postback(const std::shared_ptr<MultiPenaltyGcvCapacityResidualBatch>& p) {
+  return std::holds_alternative<std::shared_ptr<MultiPenaltyGcvCudaResidualBatchpostback64>>(p->handle);
+}
 
 int maximum_concurrency_for_bucket(MultiPenaltyGcvCapacityBucket bucket) {
   switch (bucket) {
@@ -97,9 +166,10 @@ MultiPenaltyGcvCapacityMultiResult run_multi_backend(
   std::vector<BackendRequest> backend_requests;
   backend_requests.reserve(requests.size());
   for (MultiPenaltyGcvCapacityRequest& request : requests) {
-    if (!request.prepared || request.prepared->bucket != expected_bucket) {
+    if (!request.prepared || request.prepared->bucket != expected_bucket ||
+        !std::holds_alternative<std::shared_ptr<Prepared>>(request.prepared->handle)) {
       throw std::runtime_error(
-        "capacity-dispatched multi-penalty request mixes backend buckets");
+        "capacity-dispatched request mixes backend buckets or vector-postback modes");
     }
     BackendRequest backend;
     backend.prepared = std::get<std::shared_ptr<Prepared>>(
@@ -134,6 +204,7 @@ MultiPenaltyGcvCapacityMultiResult run_multi_backend(
       release(setup.residual);
       setup.residual.reset();
     }
+    record_optimizer(requests[output.setups.size()].prepared, setup.optimization.target_count);
     output.setups.push_back(std::move(setup.optimization));
   }
   return output;
@@ -191,6 +262,15 @@ create_multi_penalty_gcv_capacity_prepared(
     int device_id) {
   const MultiPenaltyGcvCapacityBucket bucket =
     multi_penalty_gcv_capacity_bucket(coefficient_dim, penalty_count);
+  const bool requested = multi_penalty_gcv_vector_postback_requested();
+  if (requested && bucket == MultiPenaltyGcvCapacityBucket::Small64 &&
+      (coefficient_dim == 37 || coefficient_dim == 46)) {
+    return std::make_shared<MultiPenaltyGcvCapacityPrepared>(
+      bucket, create_multi_penalty_gcv_cuda_prepared_postback64(
+        X, magic_qr_packed, magic_tau, magic_r, magic_pivot_zero_based,
+        penalty_roots, penalty_matrices, penalty_ranks, initial_log_sp,
+        n, coefficient_dim, penalty_count, target_capacity, device_id), coefficient_dim);
+  }
   switch (bucket) {
     case MultiPenaltyGcvCapacityBucket::Small64:
       return std::make_shared<MultiPenaltyGcvCapacityPrepared>(
@@ -198,35 +278,35 @@ create_multi_penalty_gcv_capacity_prepared(
           X, magic_qr_packed, magic_tau, magic_r,
           magic_pivot_zero_based, penalty_roots, penalty_matrices,
           penalty_ranks, initial_log_sp, n, coefficient_dim,
-          penalty_count, target_capacity, device_id));
+          penalty_count, target_capacity, device_id), coefficient_dim);
     case MultiPenaltyGcvCapacityBucket::Base80:
       return std::make_shared<MultiPenaltyGcvCapacityPrepared>(
         bucket, create_multi_penalty_gcv_cuda_prepared(
           X, magic_qr_packed, magic_tau, magic_r,
           magic_pivot_zero_based, penalty_roots, penalty_matrices,
           penalty_ranks, initial_log_sp, n, coefficient_dim,
-          penalty_count, target_capacity, device_id));
+          penalty_count, target_capacity, device_id), coefficient_dim);
     case MultiPenaltyGcvCapacityBucket::Extended192:
       return std::make_shared<MultiPenaltyGcvCapacityPrepared>(
         bucket, create_multi_penalty_gcv_cuda_prepared_ext192(
           X, magic_qr_packed, magic_tau, magic_r,
           magic_pivot_zero_based, penalty_roots, penalty_matrices,
           penalty_ranks, initial_log_sp, n, coefficient_dim,
-          penalty_count, target_capacity, device_id));
+          penalty_count, target_capacity, device_id), coefficient_dim);
     case MultiPenaltyGcvCapacityBucket::Extended384:
       return std::make_shared<MultiPenaltyGcvCapacityPrepared>(
         bucket, create_multi_penalty_gcv_cuda_prepared_ext384(
           X, magic_qr_packed, magic_tau, magic_r,
           magic_pivot_zero_based, penalty_roots, penalty_matrices,
           penalty_ranks, initial_log_sp, n, coefficient_dim,
-          penalty_count, target_capacity, device_id));
+          penalty_count, target_capacity, device_id), coefficient_dim);
     case MultiPenaltyGcvCapacityBucket::Extended559:
       return std::make_shared<MultiPenaltyGcvCapacityPrepared>(
         bucket, create_multi_penalty_gcv_cuda_prepared_ext559(
           X, magic_qr_packed, magic_tau, magic_r,
           magic_pivot_zero_based, penalty_roots, penalty_matrices,
           penalty_ranks, initial_log_sp, n, coefficient_dim,
-          penalty_count, target_capacity, device_id));
+          penalty_count, target_capacity, device_id), coefficient_dim);
   }
   throw std::runtime_error("unknown multi-penalty CUDA capacity bucket");
 }
@@ -237,6 +317,9 @@ MultiPenaltyGcvCudaPreparedInfo multi_penalty_gcv_capacity_prepared_info(
     throw std::runtime_error(
       "capacity-dispatched multi-penalty setup has been freed");
   }
+  if (prepared->vector_postback)
+    return multi_penalty_gcv_cuda_prepared_info_postback64(
+      std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedpostback64>>(prepared->handle));
   switch (prepared->bucket) {
     case MultiPenaltyGcvCapacityBucket::Small64:
       return multi_penalty_gcv_cuda_prepared_info_small64(
@@ -284,6 +367,11 @@ void rebind_multi_penalty_gcv_capacity_l5_slot(
   if (!prepared || prepared->bucket != MultiPenaltyGcvCapacityBucket::Small64) {
     throw std::runtime_error("L5 slot requires the small64 backend");
   }
+  if (prepared->vector_postback) {
+    rebind_multi_penalty_gcv_cuda_prepared_postback_l5(
+      std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedpostback64>>(prepared->handle), geometry);
+    return;
+  }
   rebind_multi_penalty_gcv_cuda_prepared_l5(
     std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedsmall64>>(prepared->handle), geometry);
 }
@@ -292,6 +380,11 @@ void drain_multi_penalty_gcv_capacity_l5_slot(
     const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& prepared) {
   if (!prepared || prepared->bucket != MultiPenaltyGcvCapacityBucket::Small64) {
     throw std::runtime_error("L5 slot requires the small64 backend");
+  }
+  if (prepared->vector_postback) {
+    drain_multi_penalty_gcv_cuda_prepared_postback_l5(
+      std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedpostback64>>(prepared->handle));
+    return;
   }
   drain_multi_penalty_gcv_cuda_prepared_l5(
     std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedsmall64>>(prepared->handle));
@@ -319,6 +412,11 @@ void rebind_multi_penalty_gcv_capacity_l4_slot(
   if (!prepared || prepared->bucket != MultiPenaltyGcvCapacityBucket::Small64) {
     throw std::runtime_error("L4 slot requires the small64 backend");
   }
+  if (prepared->vector_postback) {
+    rebind_multi_penalty_gcv_cuda_prepared_postback_l4(
+      std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedpostback64>>(prepared->handle), geometry);
+    return;
+  }
   rebind_multi_penalty_gcv_cuda_prepared_l4(
     std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedsmall64>>(prepared->handle), geometry);
 }
@@ -327,6 +425,11 @@ void drain_multi_penalty_gcv_capacity_l4_slot(
     const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& prepared) {
   if (!prepared || prepared->bucket != MultiPenaltyGcvCapacityBucket::Small64) {
     throw std::runtime_error("L4 slot requires the small64 backend");
+  }
+  if (prepared->vector_postback) {
+    drain_multi_penalty_gcv_cuda_prepared_postback_l4(
+      std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedpostback64>>(prepared->handle));
+    return;
   }
   drain_multi_penalty_gcv_cuda_prepared_l4(
     std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedsmall64>>(prepared->handle));
@@ -351,7 +454,8 @@ create_multi_penalty_gcv_capacity_l6_slot(
 void rebind_multi_penalty_gcv_capacity_l6_slot(
     const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& prepared,
     const MultiPenaltyGcvL6Geometry& geometry) {
-  if (!prepared || prepared->bucket != MultiPenaltyGcvCapacityBucket::Small64) {
+  if (!prepared || prepared->vector_postback ||
+      prepared->bucket != MultiPenaltyGcvCapacityBucket::Small64) {
     throw std::runtime_error("L6 slot requires the small64 backend");
   }
   rebind_multi_penalty_gcv_cuda_prepared_l6(
@@ -360,7 +464,8 @@ void rebind_multi_penalty_gcv_capacity_l6_slot(
 
 void drain_multi_penalty_gcv_capacity_l6_slot(
     const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& prepared) {
-  if (!prepared || prepared->bucket != MultiPenaltyGcvCapacityBucket::Small64) {
+  if (!prepared || prepared->vector_postback ||
+      prepared->bucket != MultiPenaltyGcvCapacityBucket::Small64) {
     throw std::runtime_error("L6 slot requires the small64 backend");
   }
   drain_multi_penalty_gcv_cuda_prepared_l6(
@@ -386,7 +491,8 @@ create_multi_penalty_gcv_capacity_l3_slot(
 void rebind_multi_penalty_gcv_capacity_l3_slot(
     const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& prepared,
     const MultiPenaltyGcvL3Geometry& geometry) {
-  if (!prepared || prepared->bucket != MultiPenaltyGcvCapacityBucket::Small64) {
+  if (!prepared || prepared->vector_postback ||
+      prepared->bucket != MultiPenaltyGcvCapacityBucket::Small64) {
     throw std::runtime_error("L3 slot requires the small64 backend");
   }
   rebind_multi_penalty_gcv_cuda_prepared_l3(
@@ -395,7 +501,8 @@ void rebind_multi_penalty_gcv_capacity_l3_slot(
 
 void drain_multi_penalty_gcv_capacity_l3_slot(
     const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& prepared) {
-  if (!prepared || prepared->bucket != MultiPenaltyGcvCapacityBucket::Small64) {
+  if (!prepared || prepared->vector_postback ||
+      prepared->bucket != MultiPenaltyGcvCapacityBucket::Small64) {
     throw std::runtime_error("L3 slot requires the small64 backend");
   }
   drain_multi_penalty_gcv_cuda_prepared_l3(
@@ -429,44 +536,53 @@ multi_penalty_gcv_capacity_optimize_batch_with_residual(
     throw std::runtime_error(
       "capacity-dispatched multi-penalty setup has been freed");
   }
-  switch (prepared->bucket) {
-    case MultiPenaltyGcvCapacityBucket::Small64:
-      return retain_batch_result(
-        prepared->bucket,
-        multi_penalty_gcv_cuda_optimize_batch_small64(
-          std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedsmall64>>(
-            prepared->handle),
+  auto output = [&]() {
+    if (prepared->vector_postback)
+      return retain_batch_result(prepared->bucket,
+        multi_penalty_gcv_cuda_optimize_batch_postback64(
+          std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedpostback64>>(prepared->handle),
           Y, n, target_count, target_keys, control));
-    case MultiPenaltyGcvCapacityBucket::Base80:
-      return retain_batch_result(
-        prepared->bucket,
-        multi_penalty_gcv_cuda_optimize_batch(
-          std::get<std::shared_ptr<MultiPenaltyGcvCudaPrepared>>(
-            prepared->handle),
-          Y, n, target_count, target_keys, control));
-    case MultiPenaltyGcvCapacityBucket::Extended192:
-      return retain_batch_result(
-        prepared->bucket,
-        multi_penalty_gcv_cuda_optimize_batch_ext192(
-          std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedext192>>(
-            prepared->handle),
-          Y, n, target_count, target_keys, control));
-    case MultiPenaltyGcvCapacityBucket::Extended384:
-      return retain_batch_result(
-        prepared->bucket,
-        multi_penalty_gcv_cuda_optimize_batch_ext384(
-          std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedext384>>(
-            prepared->handle),
-          Y, n, target_count, target_keys, control));
-    case MultiPenaltyGcvCapacityBucket::Extended559:
-      return retain_batch_result(
-        prepared->bucket,
-        multi_penalty_gcv_cuda_optimize_batch_ext559(
-          std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedext559>>(
-            prepared->handle),
-          Y, n, target_count, target_keys, control));
-  }
-  throw std::runtime_error("unknown multi-penalty CUDA capacity bucket");
+    switch (prepared->bucket) {
+      case MultiPenaltyGcvCapacityBucket::Small64:
+        return retain_batch_result(
+          prepared->bucket,
+          multi_penalty_gcv_cuda_optimize_batch_small64(
+            std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedsmall64>>(
+              prepared->handle),
+            Y, n, target_count, target_keys, control));
+      case MultiPenaltyGcvCapacityBucket::Base80:
+        return retain_batch_result(
+          prepared->bucket,
+          multi_penalty_gcv_cuda_optimize_batch(
+            std::get<std::shared_ptr<MultiPenaltyGcvCudaPrepared>>(
+              prepared->handle),
+            Y, n, target_count, target_keys, control));
+      case MultiPenaltyGcvCapacityBucket::Extended192:
+        return retain_batch_result(
+          prepared->bucket,
+          multi_penalty_gcv_cuda_optimize_batch_ext192(
+            std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedext192>>(
+              prepared->handle),
+            Y, n, target_count, target_keys, control));
+      case MultiPenaltyGcvCapacityBucket::Extended384:
+        return retain_batch_result(
+          prepared->bucket,
+          multi_penalty_gcv_cuda_optimize_batch_ext384(
+            std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedext384>>(
+              prepared->handle),
+            Y, n, target_count, target_keys, control));
+      case MultiPenaltyGcvCapacityBucket::Extended559:
+        return retain_batch_result(
+          prepared->bucket,
+          multi_penalty_gcv_cuda_optimize_batch_ext559(
+            std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedext559>>(
+              prepared->handle),
+            Y, n, target_count, target_keys, control));
+    }
+    throw std::runtime_error("unknown multi-penalty CUDA capacity bucket");
+  }();
+  record_optimizer(prepared, target_count);
+  return output;
 }
 
 std::shared_ptr<MultiPenaltyGcvCapacityResidualBatch>
@@ -482,39 +598,48 @@ multi_penalty_gcv_capacity_evaluate_fixed_batch(
     throw std::runtime_error(
       "capacity-dispatched fixed evaluation setup has been freed");
   }
-  switch (prepared->bucket) {
-    case MultiPenaltyGcvCapacityBucket::Small64:
-      return std::make_shared<MultiPenaltyGcvCapacityResidualBatch>(
-        prepared->bucket, multi_penalty_gcv_cuda_evaluate_fixed_batch_small64(
-          std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedsmall64>>(
-            prepared->handle),
+  auto output = [&]() {
+    if (prepared->vector_postback)
+      return std::make_shared<MultiPenaltyGcvCapacityResidualBatch>(prepared->bucket,
+        multi_penalty_gcv_cuda_evaluate_fixed_batch_postback64(
+          std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedpostback64>>(prepared->handle),
           Y, log_sp, n, target_count, target_keys, rank_tolerance));
-    case MultiPenaltyGcvCapacityBucket::Base80:
-      return std::make_shared<MultiPenaltyGcvCapacityResidualBatch>(
-        prepared->bucket, multi_penalty_gcv_cuda_evaluate_fixed_batch(
-          std::get<std::shared_ptr<MultiPenaltyGcvCudaPrepared>>(
-            prepared->handle),
-          Y, log_sp, n, target_count, target_keys, rank_tolerance));
-    case MultiPenaltyGcvCapacityBucket::Extended192:
-      return std::make_shared<MultiPenaltyGcvCapacityResidualBatch>(
-        prepared->bucket, multi_penalty_gcv_cuda_evaluate_fixed_batch_ext192(
-          std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedext192>>(
-            prepared->handle),
-          Y, log_sp, n, target_count, target_keys, rank_tolerance));
-    case MultiPenaltyGcvCapacityBucket::Extended384:
-      return std::make_shared<MultiPenaltyGcvCapacityResidualBatch>(
-        prepared->bucket, multi_penalty_gcv_cuda_evaluate_fixed_batch_ext384(
-          std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedext384>>(
-            prepared->handle),
-          Y, log_sp, n, target_count, target_keys, rank_tolerance));
-    case MultiPenaltyGcvCapacityBucket::Extended559:
-      return std::make_shared<MultiPenaltyGcvCapacityResidualBatch>(
-        prepared->bucket, multi_penalty_gcv_cuda_evaluate_fixed_batch_ext559(
-          std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedext559>>(
-            prepared->handle),
-          Y, log_sp, n, target_count, target_keys, rank_tolerance));
-  }
-  throw std::runtime_error("unknown multi-penalty CUDA capacity bucket");
+    switch (prepared->bucket) {
+      case MultiPenaltyGcvCapacityBucket::Small64:
+        return std::make_shared<MultiPenaltyGcvCapacityResidualBatch>(
+          prepared->bucket, multi_penalty_gcv_cuda_evaluate_fixed_batch_small64(
+            std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedsmall64>>(
+              prepared->handle),
+            Y, log_sp, n, target_count, target_keys, rank_tolerance));
+      case MultiPenaltyGcvCapacityBucket::Base80:
+        return std::make_shared<MultiPenaltyGcvCapacityResidualBatch>(
+          prepared->bucket, multi_penalty_gcv_cuda_evaluate_fixed_batch(
+            std::get<std::shared_ptr<MultiPenaltyGcvCudaPrepared>>(
+              prepared->handle),
+            Y, log_sp, n, target_count, target_keys, rank_tolerance));
+      case MultiPenaltyGcvCapacityBucket::Extended192:
+        return std::make_shared<MultiPenaltyGcvCapacityResidualBatch>(
+          prepared->bucket, multi_penalty_gcv_cuda_evaluate_fixed_batch_ext192(
+            std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedext192>>(
+              prepared->handle),
+            Y, log_sp, n, target_count, target_keys, rank_tolerance));
+      case MultiPenaltyGcvCapacityBucket::Extended384:
+        return std::make_shared<MultiPenaltyGcvCapacityResidualBatch>(
+          prepared->bucket, multi_penalty_gcv_cuda_evaluate_fixed_batch_ext384(
+            std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedext384>>(
+              prepared->handle),
+            Y, log_sp, n, target_count, target_keys, rank_tolerance));
+      case MultiPenaltyGcvCapacityBucket::Extended559:
+        return std::make_shared<MultiPenaltyGcvCapacityResidualBatch>(
+          prepared->bucket, multi_penalty_gcv_cuda_evaluate_fixed_batch_ext559(
+            std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedext559>>(
+              prepared->handle),
+            Y, log_sp, n, target_count, target_keys, rank_tolerance));
+    }
+    throw std::runtime_error("unknown multi-penalty CUDA capacity bucket");
+  }();
+  postback_counts.fixed_targets[prepared->vector_postback].fetch_add(target_count, std::memory_order_relaxed);
+  return output;
 }
 
 std::shared_ptr<MultiPenaltyGcvCapacityResidualBatch>
@@ -529,44 +654,53 @@ multi_penalty_gcv_capacity_finalize_selected_coefficients(
     throw std::runtime_error(
       "capacity-dispatched coefficient finalization setup has been freed");
   }
-  switch (prepared->bucket) {
-    case MultiPenaltyGcvCapacityBucket::Small64:
-      return std::make_shared<MultiPenaltyGcvCapacityResidualBatch>(
-        prepared->bucket,
-        multi_penalty_gcv_cuda_finalize_selected_coefficients_small64(
-          std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedsmall64>>(
-            prepared->handle),
+  auto output = [&]() {
+    if (prepared->vector_postback)
+      return std::make_shared<MultiPenaltyGcvCapacityResidualBatch>(prepared->bucket,
+        multi_penalty_gcv_cuda_finalize_selected_coefficients_postback64(
+          std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedpostback64>>(prepared->handle),
           Y, coefficients, n, target_count, target_keys));
-    case MultiPenaltyGcvCapacityBucket::Base80:
-      return std::make_shared<MultiPenaltyGcvCapacityResidualBatch>(
-        prepared->bucket,
-        multi_penalty_gcv_cuda_finalize_selected_coefficients(
-          std::get<std::shared_ptr<MultiPenaltyGcvCudaPrepared>>(
-            prepared->handle),
-          Y, coefficients, n, target_count, target_keys));
-    case MultiPenaltyGcvCapacityBucket::Extended192:
-      return std::make_shared<MultiPenaltyGcvCapacityResidualBatch>(
-        prepared->bucket,
-        multi_penalty_gcv_cuda_finalize_selected_coefficients_ext192(
-          std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedext192>>(
-            prepared->handle),
-          Y, coefficients, n, target_count, target_keys));
-    case MultiPenaltyGcvCapacityBucket::Extended384:
-      return std::make_shared<MultiPenaltyGcvCapacityResidualBatch>(
-        prepared->bucket,
-        multi_penalty_gcv_cuda_finalize_selected_coefficients_ext384(
-          std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedext384>>(
-            prepared->handle),
-          Y, coefficients, n, target_count, target_keys));
-    case MultiPenaltyGcvCapacityBucket::Extended559:
-      return std::make_shared<MultiPenaltyGcvCapacityResidualBatch>(
-        prepared->bucket,
-        multi_penalty_gcv_cuda_finalize_selected_coefficients_ext559(
-          std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedext559>>(
-            prepared->handle),
-          Y, coefficients, n, target_count, target_keys));
-  }
-  throw std::runtime_error("unknown multi-penalty CUDA capacity bucket");
+    switch (prepared->bucket) {
+      case MultiPenaltyGcvCapacityBucket::Small64:
+        return std::make_shared<MultiPenaltyGcvCapacityResidualBatch>(
+          prepared->bucket,
+          multi_penalty_gcv_cuda_finalize_selected_coefficients_small64(
+            std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedsmall64>>(
+              prepared->handle),
+            Y, coefficients, n, target_count, target_keys));
+      case MultiPenaltyGcvCapacityBucket::Base80:
+        return std::make_shared<MultiPenaltyGcvCapacityResidualBatch>(
+          prepared->bucket,
+          multi_penalty_gcv_cuda_finalize_selected_coefficients(
+            std::get<std::shared_ptr<MultiPenaltyGcvCudaPrepared>>(
+              prepared->handle),
+            Y, coefficients, n, target_count, target_keys));
+      case MultiPenaltyGcvCapacityBucket::Extended192:
+        return std::make_shared<MultiPenaltyGcvCapacityResidualBatch>(
+          prepared->bucket,
+          multi_penalty_gcv_cuda_finalize_selected_coefficients_ext192(
+            std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedext192>>(
+              prepared->handle),
+            Y, coefficients, n, target_count, target_keys));
+      case MultiPenaltyGcvCapacityBucket::Extended384:
+        return std::make_shared<MultiPenaltyGcvCapacityResidualBatch>(
+          prepared->bucket,
+          multi_penalty_gcv_cuda_finalize_selected_coefficients_ext384(
+            std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedext384>>(
+              prepared->handle),
+            Y, coefficients, n, target_count, target_keys));
+      case MultiPenaltyGcvCapacityBucket::Extended559:
+        return std::make_shared<MultiPenaltyGcvCapacityResidualBatch>(
+          prepared->bucket,
+          multi_penalty_gcv_cuda_finalize_selected_coefficients_ext559(
+            std::get<std::shared_ptr<MultiPenaltyGcvCudaPreparedext559>>(
+              prepared->handle),
+            Y, coefficients, n, target_count, target_keys));
+    }
+    throw std::runtime_error("unknown multi-penalty CUDA capacity bucket");
+  }();
+  postback_counts.coefficient_finalization_targets[prepared->vector_postback].fetch_add(target_count, std::memory_order_relaxed);
+  return output;
 }
 
 MultiPenaltyGcvCudaResidualInfo multi_penalty_gcv_capacity_residual_info(
@@ -574,6 +708,10 @@ MultiPenaltyGcvCudaResidualInfo multi_penalty_gcv_capacity_residual_info(
   if (!residual) {
     throw std::runtime_error(
       "capacity-dispatched fixed residual token has been freed");
+  }
+  if (uses_vector_postback(residual)) {
+    return multi_penalty_gcv_cuda_residual_info_postback64(
+      std::get<std::shared_ptr<MultiPenaltyGcvCudaResidualBatchpostback64>>(residual->handle));
   }
   switch (residual->bucket) {
     case MultiPenaltyGcvCapacityBucket::Small64:
@@ -607,6 +745,10 @@ acquire_multi_penalty_gcv_capacity_residual_consumer_view(
     throw std::runtime_error(
       "capacity-dispatched fixed residual token has been freed");
   }
+  if (uses_vector_postback(residual)) {
+    return acquire_multi_penalty_gcv_cuda_residual_consumer_view_postback64(
+      std::get<std::shared_ptr<MultiPenaltyGcvCudaResidualBatchpostback64>>(residual->handle));
+  }
   switch (residual->bucket) {
     case MultiPenaltyGcvCapacityBucket::Small64:
       return acquire_multi_penalty_gcv_cuda_residual_consumer_view_small64(
@@ -639,6 +781,10 @@ materialize_multi_penalty_gcv_capacity_residual_shadow(
     throw std::runtime_error(
       "capacity-dispatched fixed residual token has been freed");
   }
+  if (uses_vector_postback(residual)) {
+    return materialize_multi_penalty_gcv_cuda_residual_shadow_postback64(
+      std::get<std::shared_ptr<MultiPenaltyGcvCudaResidualBatchpostback64>>(residual->handle));
+  }
   switch (residual->bucket) {
     case MultiPenaltyGcvCapacityBucket::Small64:
       return materialize_multi_penalty_gcv_cuda_residual_shadow_small64(
@@ -669,6 +815,11 @@ void release_multi_penalty_gcv_capacity_residual(
   if (!residual) {
     throw std::runtime_error(
       "capacity-dispatched fixed residual token has been freed");
+  }
+  if (uses_vector_postback(residual)) {
+    release_multi_penalty_gcv_cuda_residual_postback64(
+      std::get<std::shared_ptr<MultiPenaltyGcvCudaResidualBatchpostback64>>(residual->handle));
+    return;
   }
   switch (residual->bucket) {
     case MultiPenaltyGcvCapacityBucket::Small64:
@@ -716,6 +867,12 @@ MultiPenaltyGcvCapacityMultiResult multi_penalty_gcv_capacity_optimize_multi(
   }
   requested_concurrency = std::min(
     requested_concurrency, maximum_concurrency_for_bucket(bucket));
+  if (requests.front().prepared->vector_postback)
+    return run_multi_backend<MultiPenaltyGcvCudaMultiRequestpostback64,
+      MultiPenaltyGcvCudaPreparedpostback64>(std::move(requests), bucket,
+        requested_concurrency, retain_residuals,
+        multi_penalty_gcv_cuda_optimize_multi_postback64,
+        release_multi_penalty_gcv_cuda_residual_postback64);
   switch (bucket) {
     case MultiPenaltyGcvCapacityBucket::Small64:
       return run_multi_backend<
