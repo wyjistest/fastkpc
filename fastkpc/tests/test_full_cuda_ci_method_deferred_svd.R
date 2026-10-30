@@ -63,10 +63,10 @@ run_method <- function(method, deferred) {
   list(result = result, rng_state = rng_state)
 }
 
-on.exit(Sys.unsetenv(
+on.exit(Sys.unsetenv(c(
   "FASTKPC_STRICT_METHOD_DEFERRED_SVD_SUBMISSION",
   "FASTKPC_STRICT_PERMUTATION_RESIDUAL_ROUTE"
-), add = TRUE)
+)), add = TRUE)
 
 for (method in c("dcc.perm", "hsic.perm")) {
   synchronous <- run_method(method, FALSE)

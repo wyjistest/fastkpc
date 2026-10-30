@@ -24,6 +24,10 @@ TMP_SO="$BUILD/fastkpc_cuda.so.tmp.$$"
 COMMON_INC="$R_CPPFLAGS $RCPP_FLAGS -I$RCPP_ARMADILLO_INCLUDE -I$RCPP_EIGEN_INCLUDE -I$RSPECTRA_INCLUDE -I/usr/local/cuda/include -I$ROOT/src -I$ROOT/src/cuda"
 COMMON_CXX="$CXXSTD $CXXFLAGS -fPIC $COMMON_INC"
 
+# This TU serves dcc.perm, hsic.gamma and hsic.perm. Full and incremental
+# entries must share its numerical policy; other CUDA TUs keep their own.
+METHOD_BATCH_NUMERICAL_FLAGS="--fmad=false"
+
 (
 flock 9
 trap 'rm -f "$TMP_SO"' EXIT INT TERM
@@ -153,7 +157,7 @@ elif [ "${FASTKPC_INCREMENTAL_FIXED_SP_ONLY:-0}" = "1" ]; then
 "$CXX" $COMMON_CXX -c "$ROOT/src/r_api_cuda.cpp" \
   -o "$BUILD/r_api_cuda.o"
 
-"$NVCC" -O3 -arch=sm_89 -Xcompiler -fPIC -std=c++17 \
+"$NVCC" -O3 -arch=sm_89 $METHOD_BATCH_NUMERICAL_FLAGS -Xcompiler -fPIC -std=c++17 \
   $COMMON_INC -c "$ROOT/src/cuda/full_cuda_ci_method_batch.cu" \
   -o "$BUILD/full_cuda_ci_method_batch.o"
 "$NVCC" -O3 -arch=sm_89 -Xcompiler -fPIC -std=c++17 \
@@ -208,7 +212,7 @@ else
   $COMMON_INC -c "$ROOT/src/cuda/full_cuda_ci_vertical.cu" \
   -o "$BUILD/full_cuda_ci_vertical.o"
 
-"$NVCC" -O3 -arch=sm_89 --fmad=false -Xcompiler -fPIC -std=c++17 \
+"$NVCC" -O3 -arch=sm_89 $METHOD_BATCH_NUMERICAL_FLAGS -Xcompiler -fPIC -std=c++17 \
   $COMMON_INC -c "$ROOT/src/cuda/full_cuda_ci_method_batch.cu" \
   -o "$BUILD/full_cuda_ci_method_batch.o"
 
