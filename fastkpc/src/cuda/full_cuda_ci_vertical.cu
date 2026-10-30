@@ -578,6 +578,41 @@ __global__ void build_distance_rows_batch_kernel(
   }
 }
 
+// Structured eig consumes residuals directly. Preserve the dense kernel's
+// per-thread accumulation and reduction tree without materializing its matrix.
+__global__ void build_distance_rows_only_batch_kernel(
+    const double* residuals,
+    const int* target_indices,
+    int n,
+    int component_count,
+    double* row_sums) {
+  __shared__ double reduction[kVerticalBlockSize];
+  const int row = static_cast<int>(blockIdx.x);
+  const int component = static_cast<int>(blockIdx.y);
+  if (row >= n || component >= component_count) return;
+  const int target_index = target_indices[component];
+  const double* values = residuals +
+    static_cast<std::size_t>(target_index) * static_cast<std::size_t>(n);
+  const double row_value = values[row];
+  double sum = 0.0;
+  for (int column = static_cast<int>(threadIdx.x);
+       column < n; column += static_cast<int>(blockDim.x)) {
+    const double value = fabs(row_value - values[column]);
+    sum += value;
+  }
+  reduction[threadIdx.x] = sum;
+  __syncthreads();
+  for (int stride = kVerticalBlockSize / 2; stride > 0; stride >>= 1) {
+    if (static_cast<int>(threadIdx.x) < stride) {
+      reduction[threadIdx.x] += reduction[threadIdx.x + stride];
+    }
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) {
+    row_sums[static_cast<std::size_t>(component) * n + row] = reduction[0];
+  }
+}
+
 __global__ void reduce_rows_batch_kernel(const double* row_sums,
                                          int n,
                                          int component_count,
@@ -1766,7 +1801,6 @@ class StructuredComponentLane {
       stream->get(),allocate_callback,this));
     solver_bytes=bytes;
     targets=static_cast<int*>(allocate(capacity*sizeof(int)));
-    matrices=static_cast<double*>(allocate(size_t(capacity)*n*n*sizeof(double)));
     rows=static_cast<double*>(allocate(size_t(capacity)*n*sizeof(double)));
     totals=static_cast<double*>(allocate(capacity*sizeof(double)));
     centered=static_cast<double*>(allocate(size_t(capacity)*n*k*sizeof(double)));
@@ -1780,8 +1814,8 @@ class StructuredComponentLane {
   void submit(const double* residuals, int count, cudaEvent_t ready) {
     check_cuda(cudaStreamWaitEvent(stream->get(),ready,0),"structured input dependency");
     check_cuda(cudaEventRecord(distance_start->get(),stream->get()),"structured distance start");
-    build_distance_rows_batch_kernel<<<dim3(n,count,1),kVerticalBlockSize,0,stream->get()>>>(
-      residuals,targets,n,count,size_t(n)*n,matrices,rows);
+    build_distance_rows_only_batch_kernel<<<dim3(n,count,1),kVerticalBlockSize,0,stream->get()>>>(
+      residuals,targets,n,count,rows);
     reduce_rows_batch_kernel<<<count,kVerticalBlockSize,0,stream->get()>>>(rows,n,count,totals);
     check_cuda(cudaGetLastError(),"structured original totals");
     check_cuda(cudaEventRecord(eig_start->get(),stream->get()),"structured eig start");
@@ -1805,7 +1839,7 @@ class StructuredComponentLane {
   std::unique_ptr<StructuredComponentPlan,StructuredPlanDeleter> plan;
   StructuredComponentView view{};
   int* targets=nullptr;
-  double *matrices=nullptr,*rows=nullptr,*totals=nullptr,*centered=nullptr;
+  double *rows=nullptr,*totals=nullptr,*centered=nullptr;
  private:
   void* allocate(size_t size) {
     auto buffer=std::make_unique<TrackedDeviceBuffer>(size,accounting);
