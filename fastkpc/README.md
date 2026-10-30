@@ -7,6 +7,32 @@ files stay unchanged while the fast backend is developed and validated.
 
 ## Full-CUDA legacy-compatible skeleton and WAN-PDAG candidate
 
+For the current committed source, local native and evidence boundary, start with the
+[2026-10-30 development handoff](docs/PHASE10_DEVELOPMENT_HANDOFF_20261030.md).
+Build fix `89a8099` and runtime `ae3687f` match the measured source closure;
+the [isolated capacity acceptance](docs/PHASE10_STRUCTURED_ROWS_ISOLATED_20261030.md)
+retains its original precommit run identity.
+[Build-entry qualification](docs/PHASE10_BUILD_CONSISTENCY_20261029.md) passes
+full/incremental native identity and numerical gates. The structured row-only
+change is installed as native `b2b79fc6…e135b12b`: **GO_CAPACITY**, saving
+601.57 MiB of requested pool storage. L6 checkpoint headroom above the 2 GiB gate
+is now 699.125 MiB. Six isolated runs pass numerical, capacity, resource and
+predeclared outer non-regression gates; matched OFF/ON medians are
+**283.985/283.328 seconds**. Speed is **NOT_PROVEN** (0.23% observed decrease,
+2/3 paired wins). The capacity version's 283.328-second median is local
+source-closure development evidence, not a performance run from a clean checkout or promotion.
+The fastest slot configuration is limited to the qualified `dcc.gamma` 351 x 48 workload.
+
+The [2026-10-29 handoff](docs/PHASE10_DEVELOPMENT_HANDOFF_20261029.md) keeps
+runtime `c469ac5`, attestation `e15be9d`, and **290.491 seconds** as historical
+evidence bound to native `a1e16a9c…7b73bd34`. Its difference from 283.328 seconds
+is not this change's measured speedup. The
+[shared-host supplement](docs/PHASE10_STRUCTURED_ROWS_SHARED_HOST_20261029.md)
+retains its original receipts separately from isolated acceptance.
+Phase 10 is `ACTIVE`, candidate `NOT_FROZEN`, recommended `false`, and holdout
+`SEALED_NOT_RELEASED`. Historical receipts keep their original native SHA.
+Artifact tests reporting `SKIP` (even with exit code zero) are not `PASS`.
+
 An explicit one-call full-CUDA route now implements the numerical CI data plane
 for the exact `regrXonS`/KPC subset. The historical Phase 10 v1 campaign is
 invalid under `numerical_contract_v1`: it checked deletion and graph parity but
@@ -16,8 +42,9 @@ did not enforce the required absolute `1e-10` bound for every CI p-value and
 Those receipts are historical diagnostic evidence only and are not correctness
 or performance-candidate evidence.
 
-The current GPU-only repair returns every `dcc.gamma` p-value from the CUDA
-legacy-compatible full-eigensolver and now reproduces both mgcv selected-SP
+The GPU-only semantic repair first qualified in `377676f` returns every
+`dcc.gamma` p-value from the CUDA legacy-compatible full-eigensolver and
+reproduces both mgcv selected-SP
 finalization and the fixed-SP residual execution without CPU numerical
 authority or fallback. Producer `377676f` and native SHA-256
 `6f417bce389fa1d852e6aba8d35fb2a836e9f5a9ba30cabdbbb4c5ba789b5697`

@@ -6,11 +6,38 @@ backend work in one workspace. The active fast backend code is under
 
 ## Full-CUDA compatible skeleton and WAN-PDAG candidate
 
-The explicit full-CUDA skeleton route has passed the historical Phase 10 v1
-canonical correctness, CUDA-authority, hardening, and replay campaign. It has
-not passed the revised fresh-data performance gate and is not promoted or
-recommended. The externally held sealed promotion corpus remains
-`SEALED_NOT_RELEASED` and must not be opened for this candidate.
+Current committed source and evidence identities are recorded in the
+[2026-10-30 development handoff](fastkpc/docs/PHASE10_DEVELOPMENT_HANDOFF_20261030.md).
+Build fix `89a8099` and runtime `ae3687f` match the measured source closure;
+the [isolated capacity acceptance](fastkpc/docs/PHASE10_STRUCTURED_ROWS_ISOLATED_20261030.md)
+retains its original precommit run identity.
+The [build-entry qualification](fastkpc/docs/PHASE10_BUILD_CONSISTENCY_20261029.md)
+passes full/incremental native identity and numerical gates. The structured
+row-only change is now installed as native `b2b79fc6…e135b12b`: **GO_CAPACITY**,
+with 601.57 MiB less requested pool storage and 699.125 MiB of L6 checkpoint
+headroom above the 2 GiB gate. All six isolated runs pass numerical, capacity,
+resource and predeclared outer non-regression gates. Matched OFF/ON medians are
+**283.985/283.328 seconds**; speed is **NOT_PROVEN** (0.23% observed decrease,
+2/3 paired wins). The capacity version's 283.328-second median is local
+source-closure development evidence, not a performance run from a clean checkout or promotion.
+The fastest slot configuration remains qualified for the specified `dcc.gamma`,
+351 x 48 canonical workload, not arbitrary inputs.
+
+The [2026-10-29 handoff](fastkpc/docs/PHASE10_DEVELOPMENT_HANDOFF_20261029.md)
+preserves runtime `c469ac5`, attestation `e15be9d`, and the historical
+**290.491-second** result bound to native `a1e16a9c…7b73bd34`. Its difference
+from 283.328 seconds is not attributed to this change. The separate
+[shared-host supplement](fastkpc/docs/PHASE10_STRUCTURED_ROWS_SHARED_HOST_20261029.md)
+retains its original receipts and is not mixed into isolated acceptance.
+Phase 10 remains `ACTIVE`, candidate `NOT_FROZEN`, recommended `false`, and
+the externally held holdout `SEALED_NOT_RELEASED`.
+
+The historical Phase 10 v1 correctness claim is withdrawn. Its retrospective
+audit found 79,012 CI p-values and 1,398 `pMax` cells outside the absolute
+`1e-10` contract (maximum error `0.045461329947135143`). Graph parity did not
+establish numerical correctness. Those receipts and the old 219.513-second
+result are invalid as correctness or performance-candidate evidence. See the
+[semantic repair](fastkpc/docs/MGCV_GPU_SEMANTIC_CLOSURE.md) and current handoff.
 
 The active correctness contract is now default `kpcalg`: `m.max = Inf`, resolved
 to `p - 2`, with graph-driven natural stopping. Current Phase 9 and hardening v2
@@ -96,9 +123,11 @@ Rscript fastkpc/tests/test_full_cuda_ci_phase10_campaign_artifact.R
 Rscript fastkpc/tests/test_full_cuda_ci_phase10_completion_audit.R
 ```
 
-The public 500x50 default-Inf development fixture now passes. The completion
-audit intentionally fails until the v2 five-run performance campaign, the
-sealed holdout artifact, and the final `COMPLETE` roadmap state all exist.
+Qualification is specific to each recorded source, native and configuration.
+The completion audit intentionally fails until the v2 five-run performance
+campaign, the sealed holdout artifact, and the final `COMPLETE` roadmap state
+all exist. Artifact tests can report `SKIP` with exit code zero when local
+materials are absent; a successful exit alone is not a qualification `PASS`.
 
 Historical v1 campaign evidence is under
 `fastkpc/artifacts/full_cuda_ci/promotion_351x48_v1/`. Five fresh-process cold,
@@ -110,8 +139,8 @@ fresh-process cold median was `1290.664` seconds versus a `601.431`-second CPU
 baseline median. All CPU numerical authority, approximate-backend, and
 unknown-fallback counters were zero.
 
-`performance_budget_v2` therefore treats v1 as correctness and replay-latency
-evidence only. Promotion now requires five fresh-data compute-warm runs with
+The v1 receipts remain historical diagnostics only; their original labels
+do not override the retrospective numerical failure. Promotion requires five fresh-data compute-warm runs with
 empty dataset-specific caches, a median at most 120 seconds and at most 0.80 of
 the same-campaign correct baseline, plus a cold median no slower than that
 baseline. Replay-warm is report-only. The standard gate remains unavailable
@@ -121,17 +150,13 @@ for promotion until the v2 campaign and public 500x50 development fixture pass:
 FASTKPC_RUN_CUDA_TESTS=1 bash fastkpc/tools/run_full_cuda_ci_gate.sh
 ```
 
-The best explicit `max_conditioning_size = 7` canonical fresh-data development
-run remains `263.305` seconds. That number is not a default-`Inf` result. The
-351x48 default-`Inf` route resolves its ceiling to 46, executes nine required
-level-8 tests, and then stops naturally. The current-binary Phase 9 artifact
-completed that workload in `277.868` seconds. A separate same-process
-cold/replay-warm qualification measured `274.91` / `0.848` seconds; cold did
-241,686 physical tests, while warm had 240,498 result-cache hits and zero
-physical tests or residual fits. All graph, sepset, trace, and production
-p-value bits are exact. These results do not pass the `< 180` Checkpoint B or
-the final five-run 120-second promotion gate, so no candidate has been frozen
-and the sealed holdout remains unopened.
+The current 351x48 default-`Inf` qualification covers 240,498 logical CI tests
+through natural stopping after level 8. The latest six-run OFF/ON campaign
+preserves CI/pMax bits, task/deletion/graph/sepset/count/RNG semantics and
+resource closure; maximum authority error is `3.05425129631942e-12`. The
+283.328-second capacity-version median still fails both the `<180s` checkpoint and the
+five-run 120-second promotion gate. Historical max-7, v1, replay-warm and
+pre-semantic-closure timings are not current producer performance.
 
 Only after those prerequisites and a new source/native/contract freeze may an
 external custodian release be supplied. No holdout release input should be
