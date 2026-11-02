@@ -104,7 +104,12 @@ fresh clone 可取得源码、工具和身份索引，但不能仅凭 clone 完�
 
 ## 后续范围
 
-本次仓库收口不启动新优化实验。下一项性能工作应复用已有 Stage B/work-pair 归因，
-先确认当前基线仍缺少哪项证据，再决定窄诊断或原型。q55 继续后排；recover tile16/8、
-L8 STOP、默认开关、数值合同及所有 promotion 状态不变。冻结候选前仍需冻结 producer
-上的 clean-checkout 重复性能与完整语义资格，180/120 秒门仍未通过。
+仓库收口之后，已完成另行批准的 [fixed-VT 即时消费隔离原型](PHASE10_STAGE_B_IMMEDIATE_20261030.md)：
+当前 5N 对照与 3N 候选通过 104,797 个 components、68,297,253 次 sweep 的 GPU 逐位资格，
+未插桩 REG 82→80、无 spill。但六次 L2/L3 交错对照的各层中位数之和为
+101.642758→102.345465 秒，观察回退 0.69135%，判定 **STOP_NO_STAGE_GAIN**。
+本候选未集成生产，没有更新 283.328 秒基线，也未补跑完整 canonical 或深层晋级。
+
+q55 继续后排；recover tile16/8、L8 STOP、默认开关、数值合同及所有 promotion 状态不变。
+冻结候选前仍需冻结 producer 上的 clean-checkout 重复性能与完整语义资格，
+180/120 秒门仍未通过。
