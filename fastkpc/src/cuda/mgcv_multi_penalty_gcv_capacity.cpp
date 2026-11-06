@@ -358,7 +358,8 @@ create_multi_penalty_gcv_capacity_l5_slot(
   }
   return create_multi_penalty_gcv_capacity_prepared(
     g.X.data(), g.qr.data(), g.tau.data(), g.r.data(), g.pivot.data(),
-    roots, matrices, g.ranks, g.initial_log_sp.data(), 351, 46, 5, 8, device_id);
+    roots, matrices, g.ranks, g.initial_log_sp.data(), g.n, g.q,
+    g.penalty_count, g.target_capacity, device_id);
 }
 
 void rebind_multi_penalty_gcv_capacity_l5_slot(
@@ -403,7 +404,8 @@ create_multi_penalty_gcv_capacity_l4_slot(
   }
   return create_multi_penalty_gcv_capacity_prepared(
     g.X.data(), g.qr.data(), g.tau.data(), g.r.data(), g.pivot.data(),
-    roots, matrices, g.ranks, g.initial_log_sp.data(), 351, 37, 4, 18, device_id);
+    roots, matrices, g.ranks, g.initial_log_sp.data(), g.n, g.q,
+    g.penalty_count, g.target_capacity, device_id);
 }
 
 void rebind_multi_penalty_gcv_capacity_l4_slot(
@@ -448,7 +450,8 @@ create_multi_penalty_gcv_capacity_l6_slot(
   }
   return create_multi_penalty_gcv_capacity_prepared(
     g.X.data(), g.qr.data(), g.tau.data(), g.r.data(), g.pivot.data(),
-    roots, matrices, g.ranks, g.initial_log_sp.data(), 351, 55, 6, 5, device_id);
+    roots, matrices, g.ranks, g.initial_log_sp.data(), g.n, g.q,
+    g.penalty_count, g.target_capacity, device_id);
 }
 
 void rebind_multi_penalty_gcv_capacity_l6_slot(
@@ -485,7 +488,8 @@ create_multi_penalty_gcv_capacity_l3_slot(
   }
   return create_multi_penalty_gcv_capacity_prepared(
     g.X.data(), g.qr.data(), g.tau.data(), g.r.data(), g.pivot.data(),
-    roots, matrices, g.ranks, g.initial_log_sp.data(), 351, 28, 3, 33, device_id);
+    roots, matrices, g.ranks, g.initial_log_sp.data(), g.n, g.q,
+    g.penalty_count, g.target_capacity, device_id);
 }
 
 void rebind_multi_penalty_gcv_capacity_l3_slot(

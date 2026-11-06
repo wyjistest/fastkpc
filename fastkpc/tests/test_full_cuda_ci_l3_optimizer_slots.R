@@ -15,7 +15,7 @@ base <- c(FASTKPC_DCC_GAMMA_L3_OPTIMIZER_SLOTS="1",
   FASTKPC_DCC_GAMMA_EXACT_PRIMARY_FIXED_REUSE="1",
   FASTKPC_MULTI_PENALTY_STATUS_WAIT_BEFORE_D2H="1",
   FASTKPC_PHASE10_SETUP_OPTIMIZER_PIPELINE="0")
-reject <- function(changes,pattern="L3 optimizer slots require canonical S2",input=data) {
+reject <- function(changes,pattern="L3 optimizer slots require level prefill",input=data) {
   do.call(Sys.setenv,as.list(base));do.call(Sys.setenv,as.list(changes))
   invisible(full_cuda_ci_one_call_cache_control_native("reset"))
   before <- fastkpc_full_cuda_phase35_vertical_resource_snapshot()[fields]

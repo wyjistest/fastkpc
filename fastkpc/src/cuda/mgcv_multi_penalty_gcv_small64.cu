@@ -50,7 +50,7 @@ void rebind_multi_penalty_gcv_cuda_prepared_l5(
   auto& p = *prepared;
   if (p.residual_slot_leased) throw std::runtime_error("L5 slot output is leased");
   if (p.n != g.n || p.q != g.q || p.penalty_count != g.penalty_count ||
-      p.target_capacity != 8 || g.roots.size() > p.d_roots.count()) {
+      p.target_capacity != g.target_capacity || g.roots.size() > p.d_roots.count()) {
     throw std::runtime_error("L5 slot shape or root capacity changed");
   }
   check_cuda(cudaSetDevice(p.device_id), "select L5 slot device");
@@ -95,7 +95,7 @@ void rebind_multi_penalty_gcv_cuda_prepared_l4(
   auto& p = *prepared;
   if (p.residual_slot_leased) throw std::runtime_error("L4 slot output is leased");
   if (p.n != g.n || p.q != g.q || p.penalty_count != g.penalty_count ||
-      p.target_capacity != 18 || g.roots.size() > p.d_roots.count()) {
+      p.target_capacity != g.target_capacity || g.roots.size() > p.d_roots.count()) {
     throw std::runtime_error("L4 slot shape or root capacity changed");
   }
   check_cuda(cudaSetDevice(p.device_id), "select L4 slot device");
@@ -139,7 +139,7 @@ void rebind_multi_penalty_gcv_cuda_prepared_l6(
   auto& p = *prepared;
   if (p.residual_slot_leased) throw std::runtime_error("L6 slot output is leased");
   if (p.n != g.n || p.q != g.q || p.penalty_count != g.penalty_count ||
-      p.target_capacity != 5 || g.roots.size() > p.d_roots.count()) {
+      p.target_capacity != g.target_capacity || g.roots.size() > p.d_roots.count()) {
     throw std::runtime_error("L6 slot shape or root capacity changed");
   }
   check_cuda(cudaSetDevice(p.device_id), "select L6 slot device");
@@ -183,7 +183,7 @@ void rebind_multi_penalty_gcv_cuda_prepared_l3(
   auto& p = *prepared;
   if (p.residual_slot_leased) throw std::runtime_error("L3 slot output is leased");
   if (p.n != g.n || p.q != g.q || p.penalty_count != g.penalty_count ||
-      p.target_capacity != 33 || g.roots.size() > p.d_roots.count()) {
+      p.target_capacity != g.target_capacity || g.roots.size() > p.d_roots.count()) {
     throw std::runtime_error("L3 slot shape or root capacity changed");
   }
   check_cuda(cudaSetDevice(p.device_id), "select L3 slot device");

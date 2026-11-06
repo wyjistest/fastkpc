@@ -19,11 +19,20 @@ Sys.setenv(FASTKPC_DCC_GAMMA_STRUCTURED_COMPONENT_PREFILL="2")
 reject("must be 0 or 1")
 Sys.setenv(FASTKPC_DCC_GAMMA_STRUCTURED_COMPONENT_PREFILL="1",
            FASTKPC_DCC_GAMMA_LEVEL_COMPONENT_PREFILL="0")
-reject("requires level prefill and dcc.gamma 351x22 or 351x48 numCol=35")
+reject("requires level prefill and dcc.gamma")
 Sys.setenv(FASTKPC_DCC_GAMMA_LEVEL_COMPONENT_PREFILL="1")
-reject("requires level prefill and dcc.gamma 351x22 or 351x48 numCol=35",23L)
-reject("numCol is outside the qualified value 35",22L,34L)
+reject("numCol must be one integer, positive and less than sample size",22L,0L)
 Sys.setenv(FASTKPC_DCC_GAMMA_EXACT_PRIMARY_FIXED_REUSE="0")
 reject("requires fresh caches and exact-primary reuse")
 reject("requires fresh caches and exact-primary reuse",48L)
+Sys.setenv(FASTKPC_DCC_GAMMA_EXACT_PRIMARY_FIXED_REUSE="1",
+  FASTKPC_DCC_GAMMA_LEGACY_COMPONENT_CACHE_BYTES="1048576",
+  FASTKPC_DCC_GAMMA_LEGACY_COMPONENT_CACHE_RESIDUAL_BYPASS="1",
+  FASTKPC_DCC_GAMMA_LEGACY_COMPONENT_EIG_LANES="8")
+invisible(full_cuda_ci_one_call_cache_control_native("reset"))
+value <- fastkpc_compatible_cuda_skeleton(data[1:350,1:23],alpha=.1,
+  options=list(route="full_cuda",compatible_cuda_strict=TRUE,max_conditioning_size=0L,
+    index=1,numCol=35L,trace_level="logical",ci_method="dcc.gamma"))
+stopifnot(isTRUE(value$summary$structured_component_prefill_enabled),
+  all(unlist(fastkpc_full_cuda_phase35_vertical_resource_snapshot()[fields]) == 0))
 cat("PASS structured opt-in configuration rejection and resource closure\n")

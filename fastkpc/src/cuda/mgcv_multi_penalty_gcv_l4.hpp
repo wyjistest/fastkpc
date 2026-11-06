@@ -9,9 +9,11 @@
 namespace fastkpc {
 
 // Owned pageable input. Keep it alive until the slot's stream has drained.
-// This deliberately covers only the qualified 351 x 37, four-penalty shape.
+// The additive model fixes q and penalty_count; observation count and target
+// capacity belong to the input, never to a development dataset.
 struct MultiPenaltyGcvL4Geometry {
-  int n = 351;
+  int n = 0;
+  int target_capacity = 0;
   int q = 37;
   int penalty_count = 4;
   std::vector<double> X, qr, tau, r, roots, matrices, initial_log_sp;
@@ -20,8 +22,9 @@ struct MultiPenaltyGcvL4Geometry {
 
 inline void validate_multi_penalty_gcv_l4_geometry(
     const MultiPenaltyGcvL4Geometry& g) {
-  bool valid = g.n == 351 && g.q == 37 && g.penalty_count == 4 &&
-    g.X.size() == 351U * 37U && g.qr.size() == g.X.size() &&
+  bool valid = g.n > g.q && g.q == 37 && g.penalty_count == 4 &&
+    g.target_capacity >= 2 && g.target_capacity <= 64 &&
+    g.X.size() == static_cast<std::size_t>(g.n) * g.q && g.qr.size() == g.X.size() &&
     g.tau.size() == 37U && g.r.size() == 37U * 37U &&
     g.pivot.size() == 37U && g.ranks.size() == 4U &&
     g.offsets.size() == 4U && g.initial_log_sp.size() == 4U &&
@@ -41,7 +44,7 @@ inline void validate_multi_penalty_gcv_l4_geometry(
   }
   valid = valid && rank == 32 && 37 + rank <= 128 &&
     g.roots.size() == static_cast<std::size_t>(37 * rank);
-  if (!valid) throw std::runtime_error("L4 slot geometry is outside the qualified envelope");
+  if (!valid) throw std::runtime_error("L4 slot geometry violates the additive model or buffer capacity");
 }
 
 // A failed upload requires draining and discarding the slot; callers must not
@@ -55,4 +58,3 @@ void drain_multi_penalty_gcv_cuda_prepared_l4(
 
 }  // namespace fastkpc
 #endif
-

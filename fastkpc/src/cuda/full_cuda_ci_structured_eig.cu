@@ -22,6 +22,7 @@
 
 namespace fastkpc { namespace lapack312 {
 struct Rotation { int i, j; double c, s; };
+static_assert(sizeof(Rotation) == 24, "structured pool estimator must match rotation storage");
 struct RotationLog {
   Rotation* data;
   double* base;
@@ -398,8 +399,7 @@ struct StructuredComponentPlan {
 StructuredComponentPlan* create_structured_component_plan(
     int n, int k, int count, int rotation_capacity, cudaStream_t stream,
     StructuredComponentAllocate allocate, void* owner) {
-  if (n < 6 || n > max_n || k < 1 || k > 64 || k+1 >= n ||
-      2*(k+1)+4 > n || count < 1 || count > 64 ||
+  if (!structured_component_shape_supported(n, k) || count < 1 || count > 64 ||
       rotation_capacity < 1 || !stream || !allocate)
     throw std::runtime_error("unsupported structured component capacity");
   const auto mode = parse_structured_dbdsqr_mode(std::getenv("FASTKPC_DCC_GAMMA_STRUCTURED_WORK_PAIR"));

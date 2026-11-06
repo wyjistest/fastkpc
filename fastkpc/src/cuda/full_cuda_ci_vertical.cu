@@ -861,6 +861,7 @@ __global__ void evaluate_pair_batch_kernel(
   results[pair] = output;
 }
 
+template <bool GlobalSelection>
 __global__ void select_center_legacy_eigencomponent_kernel(
     const double* eigenvalues,
     const double* eigenvectors,
@@ -868,12 +869,18 @@ __global__ void select_center_legacy_eigencomponent_kernel(
     int num_col,
     int component_count,
     double* selected_values,
-    double* centered_vectors) {
-  extern __shared__ unsigned char selected_mask[];
-  __shared__ int selected_indices[64];
+    double* centered_vectors,
+    unsigned char* global_mask,
+    int* global_indices) {
+  extern __shared__ unsigned char shared_mask[];
+  __shared__ int shared_indices[64];
   __shared__ double reduction[kVerticalBlockSize];
   const int component = static_cast<int>(blockIdx.x);
-  if (component >= component_count || num_col > 64) return;
+  if (component >= component_count) return;
+  unsigned char* selected_mask = GlobalSelection ?
+    global_mask + static_cast<std::size_t>(component) * n : shared_mask;
+  int* selected_indices = GlobalSelection ?
+    global_indices + static_cast<std::size_t>(component) * num_col : shared_indices;
   eigenvalues += static_cast<std::size_t>(component) * n;
   eigenvectors += static_cast<std::size_t>(component) *
     static_cast<std::size_t>(n) * n;
@@ -1407,7 +1414,7 @@ class FullCudaCiLegacyEigExecutionContext {
         maximum_pair_count_(maximum_pair_count),
         eig_lane_count_(eig_lane_count),
         accounting_(accounting) {
-    if (device_id_ < 0 || n_ < 2 || num_col_ < 1 || num_col_ > 64 ||
+    if (device_id_ < 0 || n_ < 2 || num_col_ < 1 || num_col_ >= n_ ||
         maximum_component_count_ < 0 || maximum_pair_count_ < 1 ||
         eig_lane_count_ < 0 ||
         (maximum_component_count_ == 0 && eig_lane_count_ != 0) ||
@@ -1472,6 +1479,16 @@ class FullCudaCiLegacyEigExecutionContext {
         checked_multiply(component_size, k_size,
                          "legacy eig context selected values"),
         sizeof(double), "legacy eig context selected value bytes"));
+      // Keep the small shared selector; larger ranks/shapes use bounded
+      // per-component global scratch with the same selection and tie order.
+      // 32 KiB leaves room for static shared storage on supported CUDA devices.
+      if (num_col_ > 64 || n_size > 32768U) {
+        selection_mask_buffer_ = allocate_buffer(checked_multiply(
+          component_size, n_size, "legacy eig selection mask bytes"));
+        selection_index_buffer_ = allocate_buffer(checked_multiply(
+          checked_multiply(component_size, k_size, "legacy eig selection indices"),
+          sizeof(int), "legacy eig selection index bytes"));
+      }
       vector_buffer_ = allocate_buffer(checked_multiply(
         checked_multiply(component_size, vector_stride,
                          "legacy eig context vector values"),
@@ -1565,6 +1582,14 @@ class FullCudaCiLegacyEigExecutionContext {
   }
   double* selected_values() const {
     return static_cast<double*>(selected_value_buffer_->get());
+  }
+  unsigned char* selection_mask() const {
+    return selection_mask_buffer_ ?
+      static_cast<unsigned char*>(selection_mask_buffer_->get()) : nullptr;
+  }
+  int* selection_indices() const {
+    return selection_index_buffer_ ?
+      static_cast<int*>(selection_index_buffer_->get()) : nullptr;
   }
   double* vectors() const {
     return static_cast<double*>(vector_buffer_->get());
@@ -1689,6 +1714,8 @@ class FullCudaCiLegacyEigExecutionContext {
   std::unique_ptr<TrackedDeviceBuffer> total_buffer_;
   std::unique_ptr<TrackedDeviceBuffer> eigenvalue_buffer_;
   std::unique_ptr<TrackedDeviceBuffer> selected_value_buffer_;
+  std::unique_ptr<TrackedDeviceBuffer> selection_mask_buffer_;
+  std::unique_ptr<TrackedDeviceBuffer> selection_index_buffer_;
   std::unique_ptr<TrackedDeviceBuffer> vector_buffer_;
   std::unique_ptr<TrackedDeviceBuffer> component_gram_buffer_;
   std::unique_ptr<TrackedDeviceBuffer> self_moment_buffer_;
@@ -1716,10 +1743,17 @@ int submit_legacy_three_fields(FullCudaCiLegacyEigExecutionContext* context,
   check_cuda(cudaEventRecord(context->distance_end(), stream),
              "record legacy eig distance end");
   const int lanes = context->submit_eigensolves(count);
-  select_center_legacy_eigencomponent_kernel<<<count, kVerticalBlockSize,
-    static_cast<std::size_t>(n) * sizeof(unsigned char), stream>>>(
-      context->eigenvalues(), context->component_matrices(), n, k, count,
-      context->selected_values(), context->vectors());
+  if (context->selection_indices()) {
+    select_center_legacy_eigencomponent_kernel<true><<<count, kVerticalBlockSize,
+      0, stream>>>(context->eigenvalues(), context->component_matrices(), n, k, count,
+        context->selected_values(), context->vectors(), context->selection_mask(),
+        context->selection_indices());
+  } else {
+    select_center_legacy_eigencomponent_kernel<false><<<count, kVerticalBlockSize,
+      static_cast<std::size_t>(n) * sizeof(unsigned char), stream>>>(
+        context->eigenvalues(), context->component_matrices(), n, k, count,
+        context->selected_values(), context->vectors(), nullptr, nullptr);
+  }
   check_cuda(cudaGetLastError(), "launch legacy eig component selection");
   return lanes;
 }
@@ -1789,7 +1823,7 @@ struct StructuredPlanDeleter {
 class StructuredComponentLane {
  public:
   StructuredComponentLane(int n, int k, int capacity, VerticalCallAccounting* accounting,
-                          int rotation_capacity=170662)
+                          int rotation_capacity=0)
       : n(n), k(k), capacity(capacity), accounting(accounting), statuses(capacity),
         host_targets(capacity) {
     stream=std::make_unique<TrackedCudaStream>();
@@ -1797,6 +1831,7 @@ class StructuredComponentLane {
     eig_start=std::make_unique<TrackedCudaEvent>(true);
     eig_end=std::make_unique<TrackedCudaEvent>(true);
     completion=std::make_unique<TrackedCudaEvent>(true);
+    if (rotation_capacity == 0) rotation_capacity = structured_component_rotation_capacity(n);
     plan.reset(create_structured_component_plan(n,k,capacity,rotation_capacity,
       stream->get(),allocate_callback,this));
     solver_bytes=bytes;
@@ -1927,7 +1962,7 @@ class FullCudaCiLegacyEigComponentCache {
   }
 
   void begin_level(int level, std::size_t planned) {
-    if (structured_poisoned_ || level < 2 || (level == 2 && !structured_enabled_) ||
+    if (structured_poisoned_ || level < 2 ||
         level_active_ || !execution_context_ ||
         !residual_bypass_enabled_ || planned == 0 || planned > capacity_entries_) {
       throw std::runtime_error("level component prefill capacity/lifecycle failed closed");
@@ -2252,14 +2287,34 @@ class FullCudaCiLegacyEigComponentCache {
   void build_structured_level() {
     constexpr int width=64, max_contexts=10;
     auto& stats=level_stats_.back();
-    const int contexts=static_cast<int>(std::min<std::size_t>(
+    int contexts=static_cast<int>(std::min<std::size_t>(
       max_contexts,(residual_keys_.size()+width-1)/width));
     const auto creation_started=std::chrono::steady_clock::now();
-    const bool create=static_cast<int>(structured_lanes_.size())<contexts;
-    while (static_cast<int>(structured_lanes_.size())<contexts)
+    const auto before_count = structured_lanes_.size();
+    std::size_t pool_bytes = 0;
+    for (const auto& lane : structured_lanes_) pool_bytes += lane->bytes;
+    // Quadratic rotation storage per component, with the existing dense GPU
+    // overflow route. Bound the pool by bytes rather than captured counts.
+    constexpr std::size_t pool_budget = 3ULL * 1024 * 1024 * 1024;
+    constexpr std::size_t reserve = 2ULL * 1024 * 1024 * 1024;
+    while (static_cast<int>(structured_lanes_.size())<contexts) {
+      std::size_t free = 0, total = 0;
+      check_cuda(cudaMemGetInfo(&free,&total),"structured lane allocation budget");
+      const std::size_t estimate = structured_lanes_.empty() ?
+        width * (std::size_t(structured_component_rotation_capacity(n_)) * 24 +
+                 std::size_t(n_) * (num_col_ + 32) * sizeof(double)) :
+        structured_lanes_.back()->bytes;
+      if (!structured_lanes_.empty() &&
+          (pool_bytes >= pool_budget || estimate > pool_budget - pool_bytes ||
+           free <= reserve || estimate > free - reserve)) break;
+      if (structured_lanes_.empty() && (free <= reserve || estimate > free - reserve))
+        throw std::runtime_error("insufficient headroom for one structured component lane");
       structured_lanes_.push_back(std::make_unique<StructuredComponentLane>(
         n_,num_col_,width,&accounting_));
-    if (create) stats.structured_create_host_ms=host_elapsed_ms(creation_started);
+      pool_bytes += structured_lanes_.back()->bytes;
+    }
+    contexts = std::min(contexts, static_cast<int>(structured_lanes_.size()));
+    if (structured_lanes_.size() != before_count) stats.structured_create_host_ms=host_elapsed_ms(creation_started);
     stats.structured_contexts=contexts; stats.structured_width=width;
     for (const auto& lane:structured_lanes_) {
       stats.structured_solver_bytes+=lane->solver_bytes;
@@ -2508,7 +2563,7 @@ create_full_cuda_ci_legacy_eig_component_cache(
     int n, int num_col, std::size_t budget_bytes,
     bool residual_bypass_enabled, int maximum_component_count,
     int maximum_pair_count, int eig_lane_count) {
-  if (n < 2 || num_col < 1 || num_col > 64 || budget_bytes == 0U ||
+  if (n < 2 || num_col < 1 || num_col >= n || budget_bytes == 0U ||
       maximum_component_count < 0 || maximum_pair_count < 0 ||
       eig_lane_count < 0 ||
       (eig_lane_count > 0 &&
@@ -2699,8 +2754,8 @@ std::string full_cuda_ci_legacy_eig_batch_request_identity(
       request.component_capacity > static_cast<int>(target_keys.size())) {
     throw std::runtime_error("legacy eig component capacity is invalid");
   }
-  if (request.num_col != 35) {
-    throw std::runtime_error("legacy eig batch requires canonical numCol 35");
+  if (request.num_col < 1) {
+    throw std::runtime_error("legacy eig batch requires positive numCol");
   }
   for (std::size_t index = 0; index < target_keys.size(); ++index) {
     if (!is_lower_sha256(target_keys[index]) ||
@@ -3587,6 +3642,9 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch_impl(
   const std::chrono::steady_clock::time_point total_start =
     std::chrono::steady_clock::now();
   const PreparedSInfo prepared_info = prepared_s_gpu_info(prepared_s);
+  if (request.num_col < 1 || request.num_col >= batch.n) {
+    throw std::runtime_error("legacy eig numCol must be positive and less than sample size");
+  }
   if (prepared_info.prepared_s_key_sha256 !=
       request.expected_prepared_s_key_sha256) {
     throw std::runtime_error(

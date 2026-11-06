@@ -6,6 +6,20 @@
 
 namespace fastkpc {
 
+// Kernel storage and the secular root candidate count determine this envelope.
+// It is independent of the dataset's variable count or benchmark identity.
+inline bool structured_component_shape_supported(int n, int k) {
+  return n >= 6 && n <= 1024 && k >= 1 && k <= 64 &&
+    k + 1 < n && 2 * (k + 1) + 4 <= n;
+}
+
+// Bounded quadratic storage policy, not a convergence bound. A component that
+// exceeds it still takes the existing exact dense GPU fallback.
+inline int structured_component_rotation_capacity(int n) {
+  if (n < 6 || n > 1024) throw std::runtime_error("invalid structured rotation dimension");
+  return static_cast<int>((3 * std::size_t(n) * n + 1) / 2);
+}
+
 // A plan captures this once. Never select entry and work storage independently.
 enum class StructuredDbdsqrMode { Original = 0, FixedVtWorkPair = 1 };
 

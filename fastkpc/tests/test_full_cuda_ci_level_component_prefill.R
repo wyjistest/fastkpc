@@ -20,15 +20,23 @@ reject <- function(pattern, p=22L) {
 Sys.setenv(FASTKPC_DCC_GAMMA_LEVEL_COMPONENT_PREFILL="2")
 reject("must be 0 or 1")
 Sys.setenv(FASTKPC_DCC_GAMMA_LEVEL_COMPONENT_PREFILL="1")
-reject("restricted to dcc.gamma 351x22",21L)
 Sys.setenv(FASTKPC_DCC_GAMMA_EXACT_PRIMARY_FIXED_REUSE="0")
 reject("requires fresh caches and exact-primary reuse")
 Sys.setenv(FASTKPC_DCC_GAMMA_EXACT_PRIMARY_FIXED_REUSE="1",
   FASTKPC_DCC_GAMMA_LEGACY_COMPONENT_CACHE_BYTES="0",
   FASTKPC_DCC_GAMMA_LEGACY_COMPONENT_CACHE_RESIDUAL_BYPASS="0",
   FASTKPC_DCC_GAMMA_LEGACY_COMPONENT_EIG_LANES="0")
-reject("requires cache/bypass/8 lanes and original scheduler")
+reject("requires cache/bypass/eig lanes and original scheduler")
 Sys.setenv(FASTKPC_DCC_GAMMA_LEGACY_COMPONENT_CACHE_BYTES="1048576",
   FASTKPC_DCC_GAMMA_LEGACY_COMPONENT_CACHE_RESIDUAL_BYPASS="1")
-reject("requires cache/bypass/8 lanes and original scheduler")
+reject("requires cache/bypass/eig lanes and original scheduler")
+Sys.setenv(FASTKPC_DCC_GAMMA_LEGACY_COMPONENT_EIG_LANES="8")
+for (p in c(2L, 6L, 21L)) {
+  invisible(full_cuda_ci_one_call_cache_control_native("reset"))
+  value <- fastkpc_compatible_cuda_skeleton(data[,seq_len(p),drop=FALSE],alpha=.1,
+    options=list(route="full_cuda",compatible_cuda_strict=TRUE,max_conditioning_size=0L,
+      index=1,numCol=35L,trace_level="logical",ci_method="dcc.gamma"))
+  stopifnot(value$summary$legacy_component_eig_lane_count == min(p,8L),
+    all(unlist(fastkpc_full_cuda_phase35_vertical_resource_snapshot()[live]) == 0))
+}
 cat("PASS level component prefill configuration rejection and resource closure\n")

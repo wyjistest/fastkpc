@@ -73,11 +73,17 @@ assert_true(
 )
 assert_error(
   fastkpc_full_cuda_phase35_legacy_eig_batch_request_from_logical(
-    prepared_key, target_keys, logical_rows, num_col = 34L
+    prepared_key, target_keys, logical_rows, num_col = 0L
   ),
-  "canonical num_col 35L",
-  "noncanonical legacy eig rank must fail closed"
+  "positive integer num_col",
+  "nonpositive legacy eig rank must fail closed"
 )
+other_rank <- fastkpc_full_cuda_phase35_legacy_eig_batch_request_from_logical(
+  prepared_key, target_keys, logical_rows, num_col = 34L
+)
+assert_true(other_rank$num_col == 34L &&
+  other_rank$request_identity_sha256 != request$request_identity_sha256,
+  "legacy eig request identity must distinguish ranks")
 
 data <- readRDS(file.path(
   "fastkpc", "artifacts", "kpc_tprs_real_zhu",

@@ -125,10 +125,10 @@ unsupported_errors$index <- assert_error(
 )
 unsupported_errors$num_col <- assert_error(
   precision_run_skeleton_full_cuda_native(
-    data, 0.1, 1L, 1, 34L, "logical", TRUE
+    data, 0.1, 1L, 1, 0L, "logical", TRUE
   ),
-  "numCol is outside the qualified value 35",
-  "unsupported numCol must fail closed"
+  "numCol must be one integer, positive and less than sample size",
+  "invalid numCol must fail closed"
 )
 unsupported_errors$strict <- assert_error(
   precision_run_skeleton_full_cuda_native(

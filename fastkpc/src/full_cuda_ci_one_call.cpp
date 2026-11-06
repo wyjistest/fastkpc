@@ -1552,10 +1552,13 @@ struct OneCallDiagnostics {
   OptimizerSlotDiagnostics l3_slots, l4_slots, l5_slots, l6_slots;
   bool l4_optimizer_workers32_enabled = false;
   bool level_component_prefill_enabled = false;
+  bool structured_component_prefill_requested = false;
   bool structured_component_prefill_enabled = false;
   bool l2_component_prefill_enabled = false;
+  int level_component_prefill_suspended_level = -1;
+  int level_component_prefill_capacity_skips = 0;
   bool prefill_at_level(int level) const {
-    return level_component_prefill_enabled &&
+    return level_component_prefill_enabled && level != level_component_prefill_suspended_level &&
       (level >= 3 || (level == 2 && l2_component_prefill_enabled));
   }
   bool level_component_order_audit = false;
@@ -4648,7 +4651,7 @@ SinglePenaltyPrefillWindowWork prepare_single_penalty_prefill_window(
     input.initial_sp = geometry.initial_sp;
     input.materialize_grid = false;
     input.keep_transcript = false;
-    if (diagnostics->l2_component_prefill_enabled && plan.level == 2) {
+    if (diagnostics->prefill_at_level(plan.level) && plan.level == 2) {
       const auto retain_started = std::chrono::steady_clock::now();
       request.prefill_Y = input.Y;
       work.component_preparation_ms += elapsed_ms(retain_started);
@@ -4694,7 +4697,7 @@ void prefill_single_penalty_components(
   const auto& context = request.context;
   const int total = static_cast<int>(request.targets.size());
   require(cache && diagnostics->prefill_at_level(2) && context &&
-            context->n == 351 && context->coefficient_dim == 30 &&
+            context->n > context->coefficient_dim && context->coefficient_dim == 30 &&
             context->penalty_count == 1 && total >= 2 &&
             setup.targets.size() == request.targets.size() &&
             request.prefill_Y.size() == static_cast<std::size_t>(total) * context->n &&
@@ -4822,7 +4825,7 @@ void complete_single_penalty_prefill_window(
       work->batch.optimized_target_keys.push_back(base_key);
       diagnostics->prefill_target_keys.insert(base_key);
     }
-    if (diagnostics->l2_component_prefill_enabled && work->batch.level == 2) {
+    if (diagnostics->prefill_at_level(work->batch.level) && work->batch.level == 2) {
       const auto stage_a_started = std::chrono::steady_clock::now();
       prefill_single_penalty_components(request, setup, diagnostics);
       component_finalization_ms += elapsed_ms(stage_a_started);
@@ -5000,12 +5003,12 @@ struct MultiPenaltyPrefillWindowWork {
   bool coefficients_already_detached = false;
 };
 
-// Only independently qualified envelopes use reusable optimizer slots.
+// Model dimensions select the backend; input dimensions determine storage.
 struct L3OptimizerSlotPolicy {
   using Geometry = MultiPenaltyGcvL3Geometry;
   static constexpr int level = 3, q = 28, penalties = 3;
   static void validate(const Geometry& g) { validate_multi_penalty_gcv_l3_geometry(g); }
-  static bool cohort(int count) { return count >= 2 && count <= 33; }
+  static bool cohort(int count) { return count >= 2 && count <= 64 - level; }
   static auto create(const Geometry& g, int device) { return create_multi_penalty_gcv_capacity_l3_slot(g, device); }
   static void bind(const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& p, const Geometry& g) {
     rebind_multi_penalty_gcv_capacity_l3_slot(p, g);
@@ -5019,13 +5022,7 @@ struct L4OptimizerSlotPolicy {
   using Geometry = MultiPenaltyGcvL4Geometry;
   static constexpr int level = 4, q = 37, penalties = 4;
   static void validate(const Geometry& g) { validate_multi_penalty_gcv_l4_geometry(g); }
-  static bool cohort(int count) {
-    switch (count) {
-      case 2: case 3: case 4: case 5: case 6: case 7: case 8:
-      case 10: case 11: case 12: case 14: case 16: case 17: case 18: return true;
-      default: return false;
-    }
-  }
+  static bool cohort(int count) { return count >= 2 && count <= 64 - level; }
   static auto create(const Geometry& g, int device) { return create_multi_penalty_gcv_capacity_l4_slot(g, device); }
   static void bind(const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& p, const Geometry& g) {
     rebind_multi_penalty_gcv_capacity_l4_slot(p, g);
@@ -5038,7 +5035,7 @@ struct L5OptimizerSlotPolicy {
   using Geometry = MultiPenaltyGcvL5Geometry;
   static constexpr int level = 5, q = 46, penalties = 5;
   static void validate(const Geometry& g) { validate_multi_penalty_gcv_l5_geometry(g); }
-  static bool cohort(int count) { return count == 2 || count == 3 || count == 4 || count == 8; }
+  static bool cohort(int count) { return count >= 2 && count <= 64 - level; }
   static auto create(const Geometry& g, int device) { return create_multi_penalty_gcv_capacity_l5_slot(g, device); }
   static void bind(const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& p, const Geometry& g) {
     rebind_multi_penalty_gcv_capacity_l5_slot(p, g);
@@ -5052,7 +5049,7 @@ struct L6OptimizerSlotPolicy {
   using Geometry = MultiPenaltyGcvL6Geometry;
   static constexpr int level = 6, q = 55, penalties = 6;
   static void validate(const Geometry& g) { validate_multi_penalty_gcv_l6_geometry(g); }
-  static bool cohort(int count) { return count == 2 || count == 3 || count == 5; }
+  static bool cohort(int count) { return count >= 2 && count <= 64 - level; }
   static auto create(const Geometry& g, int device) { return create_multi_penalty_gcv_capacity_l6_slot(g, device); }
   static void bind(const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& p, const Geometry& g) {
     rebind_multi_penalty_gcv_capacity_l6_slot(p, g);
@@ -5064,13 +5061,15 @@ struct L6OptimizerSlotPolicy {
 
 template<class Policy>
 typename Policy::Geometry pack_optimizer_slot_geometry(
-    const std::shared_ptr<NativeSetupContext>& context) {
-  require(context && context->n == 351 && context->coefficient_dim == Policy::q &&
+    const std::shared_ptr<NativeSetupContext>& context, int target_capacity) {
+  require(context && context->n > Policy::q && context->coefficient_dim == Policy::q &&
             context->penalty_count == Policy::penalties && !context->multi_penalty,
-          "optimizer slot slot request has an unqualified shape or retained handle");
+          "optimizer slot request has an invalid model shape or retained handle");
   typename Policy::Geometry g;
-  g.X = copy_numeric_matrix(context->setup["X"], 351, Policy::q, "optimizer slot X");
-  g.qr = copy_numeric_matrix(context->geometry["magic_qr_packed"], 351, Policy::q, "optimizer slot QR");
+  g.n = context->n;
+  g.target_capacity = target_capacity;
+  g.X = copy_numeric_matrix(context->setup["X"], g.n, Policy::q, "optimizer slot X");
+  g.qr = copy_numeric_matrix(context->geometry["magic_qr_packed"], g.n, Policy::q, "optimizer slot QR");
   g.tau = copy_numeric_vector(context->geometry["magic_tau"], Policy::q, "optimizer slot tau");
   g.r = copy_numeric_matrix(context->geometry["magic_r"], Policy::q, Policy::q, "optimizer slot R");
   g.initial_log_sp = copy_numeric_vector(context->geometry["initial_log_sp"], Policy::penalties, "optimizer slot initial SP");
@@ -5115,12 +5114,27 @@ class OptimizerSlotPool : public OptimizerSlotStageA {
     std::size_t total = 0;
     check_one_call_cuda(cudaMemGetInfo(&diagnostics_->free_before, &total), "optimizer slot memory before create");
     try {
+      const std::size_t creation_budget = Policy::level == 3 ?
+        l3_optimizer_slot_capacity::creation_limit : 1024ULL * 1024 * 1024;
+      const std::size_t reserve = 2ULL * 1024 * 1024 * 1024 +
+        (Policy::level == 3 ? l3_optimizer_slot_capacity::growth_limit : 0);
+      std::size_t previous_free = diagnostics_->free_before, slot_bytes = 0;
       for (int i = 0; i < std::min<int>(32, geometry.size()); ++i) {
+        if (i > 0) {
+          const std::size_t used = diagnostics_->free_before > previous_free ?
+            diagnostics_->free_before - previous_free : 0U;
+          if (used >= creation_budget || slot_bytes > creation_budget - used ||
+              previous_free <= reserve || slot_bytes > previous_free - reserve) break;
+        }
         slots_.push_back(Policy::create(*largest, device_));
         ++diagnostics_->created;
         events_.push_back(nullptr);
         check_one_call_cuda(cudaEventCreateWithFlags(&events_.back(),
           cudaEventDisableTiming | cudaEventBlockingSync), "create optimizer slot detach event");
+        std::size_t current_free = 0;
+        check_one_call_cuda(cudaMemGetInfo(&current_free, &total), "measure optimizer slot allocation");
+        slot_bytes = std::max(slot_bytes, previous_free > current_free ? previous_free - current_free : 0U);
+        previous_free = current_free;
       }
       check_one_call_cuda(cudaMemGetInfo(&diagnostics_->free_after, &total), "optimizer slot memory after create");
       require(diagnostics_->free_after >= 2ULL * 1024 * 1024 * 1024,
@@ -5191,7 +5205,7 @@ class OptimizerSlotPool : public OptimizerSlotStageA {
       }
       require(capacity::accepted(phase, diagnostics_->free_before, diagnostics_->free_after, free),
               "L3 optimizer slots exceeded the split raw capacity contract");
-    } else if constexpr (Policy::level == 4 || Policy::level == 6) {
+    } else if constexpr (Policy::level == 4 || Policy::level == 5 || Policy::level == 6) {
       std::size_t free = 0, total = 0;
       check_one_call_cuda(cudaMemGetInfo(&free, &total), "optimizer slot joint memory");
       diagnostics_->minimum_free = diagnostics_->minimum_free ?
@@ -5307,7 +5321,7 @@ MultiPenaltyPrefillWindowWork prepare_multi_penalty_prefill_window(
         data.begin() + static_cast<std::ptrdiff_t>(target + 1) * context->n,
         input.Y.begin() + static_cast<std::ptrdiff_t>(index) * context->n);
     }
-    if (diagnostics->level_component_prefill_enabled) request.prefill_Y = input.Y;
+    if (diagnostics->prefill_at_level(plan.level)) request.prefill_Y = input.Y;
     work.metadata.push_back(std::move(request));
     work.requests.push_back(std::move(input));
   }
@@ -5327,11 +5341,11 @@ MultiPenaltyPrefillWindowWork prepare_multi_penalty_prefill_window(
       // Preserve the original window, prepared objects, and target cohorts.
       // Only cap host workers feeding the unchanged per-setup CUDA optimizer.
       for (const auto& request : work.metadata) {
-        require(request.context->n == 351 &&
+        require(request.context->n > request.context->coefficient_dim &&
                   request.context->coefficient_dim == 37 &&
                   request.context->penalty_count == 4 &&
-                  request.targets.size() >= 2U && request.targets.size() <= 18U,
-                "L4 optimizer workers require the qualified q37/four-penalty cohort envelope");
+                  request.targets.size() >= 2U && request.targets.size() <= 60U,
+                "L4 optimizer workers require an additive q37/four-penalty model");
       }
       work.maximum_concurrency = std::min(work.maximum_concurrency, 32);
     }
@@ -5529,7 +5543,7 @@ void complete_multi_penalty_prefill_window(
             work->batch.level, request.base_target_keys, exact_residual_keys,
             optimization.residuals[setup_index]);
         }
-        if (diagnostics->level_component_prefill_enabled) {
+        if (diagnostics->prefill_at_level(work->batch.level)) {
           work->metadata[setup_index].prefill_residual_keys = exact_residual_keys;
         }
       }
@@ -5542,7 +5556,7 @@ void complete_multi_penalty_prefill_window(
       coefficient_arena->finish_store_window();
       release_multi_penalty_prefill_window_residuals(
         &optimization.residuals);
-      if (diagnostics->level_component_prefill_enabled) {
+      if (diagnostics->prefill_at_level(work->batch.level)) {
         const auto stage_a_started = std::chrono::steady_clock::now();
         const auto cache = diagnostics->level_component_cache.lock();
         require(cache != nullptr, "level component prefill cache expired");
@@ -5680,17 +5694,20 @@ void prefill_optimizer_slot_target_states(
   if (work.requests.empty()) return;
   std::vector<typename Policy::Geometry> geometry;
   geometry.reserve(work.metadata.size());
+  int target_capacity = 2;
+  for (const auto& request : work.requests)
+    target_capacity = std::max(target_capacity, request.target_count);
   std::size_t targets = 0;
   for (std::size_t i = 0; i < work.requests.size(); ++i) {
     auto& request = work.requests[i];
     require(Policy::cohort(request.target_count),
-            "optimizer slot target cohort is outside the qualified envelope");
+            "optimizer slot target cohort exceeds the graph variable bound");
     require(request.control.exact_primary_only &&
               request.control.decomposition_trace_capacity_per_target == 0,
             "optimizer slot control is outside the qualified envelope");
     request.control.force_final_selected_evaluation = true;
     targets += request.target_count;
-    geometry.push_back(pack_optimizer_slot_geometry<Policy>(work.metadata[i].context));
+    geometry.push_back(pack_optimizer_slot_geometry<Policy>(work.metadata[i].context, target_capacity));
   }
   arena->reserve_slot_layer(Policy::level, Policy::q, targets);
   OptimizerSlotPool<Policy> pool(geometry, &d);
@@ -5806,10 +5823,11 @@ void prefill_multi_penalty_level_target_states(
   std::vector<SinglePenaltyPrefillGroup> window;
   window.reserve(
     static_cast<std::size_t>(kMultiPenaltyGcvMaximumConcurrentSetups));
-  if ((diagnostics->l3_slots.enabled && plan.level == 3) ||
+  if (diagnostics->prefill_at_level(plan.level) &&
+      ((diagnostics->l3_slots.enabled && plan.level == 3) ||
       (diagnostics->l4_slots.enabled && plan.level == 4) ||
       (diagnostics->l5_slots.enabled && plan.level == 5) ||
-      (diagnostics->l6_slots.enabled && plan.level == 6)) {
+      (diagnostics->l6_slots.enabled && plan.level == 6))) {
     for (const auto& entry : tasks_by_conditioning) {
       require(!entry.second.empty(), "slot conditioning group is empty");
       const auto& task = plan.tasks[static_cast<std::size_t>(entry.second.front())];
@@ -7071,8 +7089,8 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
           "compatible.cuda one-call alpha is outside the qualified value 0.1");
   require(index == 1.0,
           "compatible.cuda one-call index is outside the qualified value 1");
-  require(num_col == 35 && num_col < n,
-          "compatible.cuda one-call numCol is outside the qualified value 35");
+  require(num_col >= 1 && num_col < n,
+          "compatible.cuda one-call numCol must be positive and less than sample size");
   require(max_conditioning_size >= 0 && max_conditioning_size <= p - 2,
           "compatible.cuda one-call conditioning size is outside [0, p-2]");
   require(trace_level == "summary" || trace_level == "logical" ||
@@ -7112,26 +7130,26 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
   OneCallDiagnostics diagnostics;
   diagnostics.level_component_prefill_enabled = level_component_flag(
     "FASTKPC_DCC_GAMMA_LEVEL_COMPONENT_PREFILL");
-  diagnostics.structured_component_prefill_enabled = level_component_flag(
+  diagnostics.structured_component_prefill_requested = level_component_flag(
     "FASTKPC_DCC_GAMMA_STRUCTURED_COMPONENT_PREFILL");
+  diagnostics.structured_component_prefill_enabled =
+    diagnostics.structured_component_prefill_requested &&
+    structured_component_shape_supported(n, num_col);
   diagnostics.l2_component_prefill_enabled = level_component_flag(
     "FASTKPC_DCC_GAMMA_L2_COMPONENT_PREFILL");
   require(!diagnostics.l2_component_prefill_enabled ||
             (diagnostics.level_component_prefill_enabled &&
-             diagnostics.structured_component_prefill_enabled &&
-             method_options.ci_method == "dcc.gamma" && n == 351 && p == 48 && num_col == 35),
-          "L2 component prefill requires structured level prefill and dcc.gamma 351x48 numCol=35");
-  require(!diagnostics.structured_component_prefill_enabled ||
+             method_options.ci_method == "dcc.gamma"),
+          "L2 component prefill requires level prefill and dcc.gamma");
+  require(!diagnostics.structured_component_prefill_requested ||
             (diagnostics.level_component_prefill_enabled &&
-             method_options.ci_method == "dcc.gamma" && n == 351 &&
-             (p == 22 || p == 48) && num_col == 35),
-          "structured component prefill requires level prefill and dcc.gamma 351x22 or 351x48 numCol=35");
+             method_options.ci_method == "dcc.gamma"),
+          "structured component prefill requires level prefill and dcc.gamma");
   diagnostics.level_component_order_audit = diagnostics.level_component_prefill_enabled ||
     level_component_flag("FASTKPC_DIAG_LEVEL_COMPONENT_ORDER");
   require(!diagnostics.level_component_prefill_enabled ||
-            (method_options.ci_method == "dcc.gamma" && n == 351 &&
-             (p == 22 || p == 48)),
-          "level component prefill prototype is restricted to dcc.gamma 351x22 or 351x48");
+            method_options.ci_method == "dcc.gamma",
+          "level component prefill requires dcc.gamma");
   diagnostics.dcc_gamma_exact_primary_optimizer_requested =
     method_options.ci_method == "dcc.gamma" &&
       dcc_gamma_exact_primary_optimizer_policy();
@@ -7195,7 +7213,7 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
   diagnostics.l6_slots.enabled = level_component_flag("FASTKPC_DCC_GAMMA_L6_OPTIMIZER_SLOTS");
   diagnostics.l3_slots.enabled = level_component_flag("FASTKPC_DCC_GAMMA_L3_OPTIMIZER_SLOTS");
   require(!diagnostics.l3_slots.enabled ||
-            (method_options.ci_method == "dcc.gamma" && n == 351 && p == 48 &&
+            (method_options.ci_method == "dcc.gamma" &&
              diagnostics.l4_slots.enabled && diagnostics.l5_slots.enabled && diagnostics.l6_slots.enabled &&
              level_component_flag("FASTKPC_CUDA_DEVICE_PROPERTIES_CACHE") &&
              diagnostics.l2_component_prefill_enabled &&
@@ -7203,9 +7221,9 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
              !diagnostics.setup_optimizer_pipeline_enabled &&
              diagnostics.cuda_multi_penalty_decomposition_trace_capacity_per_target == 0 &&
              level_component_flag("FASTKPC_MULTI_PENALTY_STATUS_WAIT_BEFORE_D2H")),
-          "L3 optimizer slots require canonical S2, L4/L5/L6 slots, properties cache, exact-primary reuse, status wait and original setup scheduling");
+          "L3 optimizer slots require level prefill, L4/L5/L6 slots, properties cache, exact-primary reuse, status wait and original setup scheduling");
   require(!diagnostics.l6_slots.enabled ||
-            (method_options.ci_method == "dcc.gamma" && n == 351 && p == 48 &&
+            (method_options.ci_method == "dcc.gamma" &&
              diagnostics.l4_slots.enabled && diagnostics.l5_slots.enabled &&
              level_component_flag("FASTKPC_CUDA_DEVICE_PROPERTIES_CACHE") &&
              diagnostics.l2_component_prefill_enabled &&
@@ -7213,32 +7231,32 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
              !diagnostics.setup_optimizer_pipeline_enabled &&
              diagnostics.cuda_multi_penalty_decomposition_trace_capacity_per_target == 0 &&
              level_component_flag("FASTKPC_MULTI_PENALTY_STATUS_WAIT_BEFORE_D2H")),
-          "L6 optimizer slots require canonical S2, L4/L5 slots, properties cache, exact-primary reuse, status wait and original setup scheduling");
+          "L6 optimizer slots require level prefill, L4/L5 slots, properties cache, exact-primary reuse, status wait and original setup scheduling");
   require(!diagnostics.l4_slots.enabled ||
-            (method_options.ci_method == "dcc.gamma" && n == 351 && p == 48 &&
+            (method_options.ci_method == "dcc.gamma" &&
              diagnostics.l4_optimizer_workers32_enabled &&
              diagnostics.l2_component_prefill_enabled &&
              diagnostics.exact_primary_fixed_reuse_requested &&
              !diagnostics.setup_optimizer_pipeline_enabled &&
              diagnostics.cuda_multi_penalty_decomposition_trace_capacity_per_target == 0 &&
              level_component_flag("FASTKPC_MULTI_PENALTY_STATUS_WAIT_BEFORE_D2H")),
-          "L4 optimizer slots require canonical S2, workers32, exact-primary reuse, status wait and original setup scheduling");
+          "L4 optimizer slots require level prefill, workers32, exact-primary reuse, status wait and original setup scheduling");
   require(!diagnostics.l4_optimizer_workers32_enabled ||
-            (method_options.ci_method == "dcc.gamma" && n == 351 && p == 48 &&
+            (method_options.ci_method == "dcc.gamma" &&
              diagnostics.l2_component_prefill_enabled &&
              diagnostics.exact_primary_fixed_reuse_requested &&
              !diagnostics.setup_optimizer_pipeline_enabled &&
              diagnostics.cuda_multi_penalty_decomposition_trace_capacity_per_target == 0 &&
              level_component_flag("FASTKPC_MULTI_PENALTY_STATUS_WAIT_BEFORE_D2H")),
-          "L4 optimizer workers require canonical S2, exact-primary reuse, status wait and original setup scheduling");
+          "L4 optimizer workers require level prefill, exact-primary reuse, status wait and original setup scheduling");
   require(!diagnostics.l5_slots.enabled ||
-            (method_options.ci_method == "dcc.gamma" && n == 351 && p == 48 &&
+            (method_options.ci_method == "dcc.gamma" &&
              diagnostics.l2_component_prefill_enabled &&
              diagnostics.exact_primary_fixed_reuse_requested &&
              !diagnostics.setup_optimizer_pipeline_enabled &&
              diagnostics.cuda_multi_penalty_decomposition_trace_capacity_per_target == 0 &&
              level_component_flag("FASTKPC_MULTI_PENALTY_STATUS_WAIT_BEFORE_D2H")),
-          "L5 optimizer slots require canonical S2, exact-primary reuse, status wait and original setup scheduling");
+          "L5 optimizer slots require level prefill, exact-primary reuse, status wait and original setup scheduling");
   const CompactResultCache::Snapshot result_cache_start =
     compact_result_cache().snapshot(dataset);
   diagnostics.result_cache_capacity = result_cache_start.capacity;
@@ -7334,10 +7352,12 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
   if (diagnostics.level_component_prefill_enabled) {
     require(legacy_component_cache &&
               diagnostics.legacy_component_cache_residual_bypass_requested &&
-              diagnostics.legacy_component_eig_lane_count == 8 &&
+              diagnostics.legacy_component_eig_lane_count > 0 &&
+              diagnostics.legacy_component_eig_lane_count ==
+                std::min(diagnostics.legacy_component_eig_lane_count_requested, p) &&
               diagnostics.legacy_component_wave_capacity_requested == 1 &&
               !diagnostics.legacy_component_wave_positive_miss_only_requested,
-            "level component prefill requires cache/bypass/8 lanes and original scheduler");
+            "level component prefill requires cache/bypass/eig lanes and original scheduler");
     diagnostics.level_component_cache = legacy_component_cache;
     configure_full_cuda_ci_structured_prefill(legacy_component_cache,
       diagnostics.structured_component_prefill_enabled);
@@ -7407,7 +7427,8 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
       const int task_count = static_cast<int>(plan.tasks.size());
       // A preceding deletion can leave the next planned layer empty. Skip all
       // three prefill lifecycle operations together, preserving ordinary replay.
-      const bool prefill_this_level = diagnostics.prefill_at_level(level) && task_count > 0;
+      diagnostics.level_component_prefill_suspended_level = -1;
+      bool prefill_this_level = diagnostics.prefill_at_level(level) && task_count > 0;
       std::vector<unsigned char> delete_edges(
         static_cast<std::size_t>(p) * p, 0U);
       std::vector<unsigned char> consumed(
@@ -7438,9 +7459,21 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
         }
         std::size_t planned = 0;
         for (const auto& group : planned_targets) planned += group.second.size();
-        const auto begin_started = std::chrono::steady_clock::now();
-        begin_full_cuda_ci_level_component_prefill(legacy_component_cache, level, planned);
-        diagnostics.level_component_begin_host_ms[level] += elapsed_ms(begin_started);
+        std::size_t free_bytes = 0, total_bytes = 0;
+        check_one_call_cuda(cudaMemGetInfo(&free_bytes, &total_bytes), "sample level prefill capacity");
+        constexpr std::size_t reserve = 2ULL * 1024 * 1024 * 1024;
+        // Whole-layer prefill is optional. Keep the ordinary exact GPU path
+        // when this input's cache or residual arena would exceed its budget.
+        if (planned > diagnostics.legacy_component_cache_capacity_entries ||
+            free_bytes <= reserve || planned > (free_bytes - reserve) / (std::size_t(n) * sizeof(double))) {
+          diagnostics.level_component_prefill_suspended_level = level;
+          ++diagnostics.level_component_prefill_capacity_skips;
+          prefill_this_level = false;
+        } else {
+          const auto begin_started = std::chrono::steady_clock::now();
+          begin_full_cuda_ci_level_component_prefill(legacy_component_cache, level, planned);
+          diagnostics.level_component_begin_host_ms[level] += elapsed_ms(begin_started);
+        }
       }
 
       std::vector<std::vector<int>> edge_tasks(
@@ -7958,7 +7991,11 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
         finish_full_cuda_ci_level_component_prefill(legacy_component_cache);
         diagnostics.level_component_finish_host_ms[level] += elapsed_ms(finish_started);
       }
-      if (pcalg_done) break;
+      // pcalg also stops when the final edge is deleted, even if a test's
+      // original neighbor count had made another level appear reachable.
+      if (pcalg_done ||
+          std::none_of(adjacency.begin(), adjacency.end(),
+                       [](int value) { return value != 0; })) break;
     }
   } catch (...) {
     close_context(direct);
@@ -8245,7 +8282,10 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
         diagnostics.legacy_component_execution_context_device_bytes == 0U) ||
        (legacy_component_cache_info.eig_lane_count > 0 &&
         diagnostics.legacy_component_eig_lane_count_requested > 0 &&
-        diagnostics.legacy_component_eig_active_lane_peak >= 1 &&
+        ((diagnostics.legacy_component_cache_miss_count == 0 &&
+          diagnostics.legacy_component_eig_active_lane_peak == 0) ||
+         (diagnostics.legacy_component_cache_miss_count > 0 &&
+          diagnostics.legacy_component_eig_active_lane_peak >= 1)) &&
         diagnostics.legacy_component_eig_active_lane_peak <=
           diagnostics.legacy_component_eig_lane_count &&
         diagnostics.legacy_component_eig_multilane_batch_count <=
@@ -9004,6 +9044,8 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
         Rcpp::Named("peak_workers") = diagnostics.l5_slots.peak_workers,
         Rcpp::Named("free_before_create") = static_cast<double>(diagnostics.l5_slots.free_before),
         Rcpp::Named("free_after_create") = static_cast<double>(diagnostics.l5_slots.free_after),
+        Rcpp::Named("minimum_free_bytes") = static_cast<double>(diagnostics.l5_slots.minimum_free),
+        Rcpp::Named("maximum_pool_increment_bytes") = static_cast<double>(diagnostics.l5_slots.maximum_pool_increment),
         Rcpp::Named("prepare_ms") = diagnostics.l5_slots.prepare_ms,
         Rcpp::Named("work_ms") = diagnostics.l5_slots.work_ms,
         Rcpp::Named("destroy_ms") = diagnostics.l5_slots.destroy_ms,
@@ -9011,6 +9053,8 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
         Rcpp::Named("detach_sum_ms") = diagnostics.l5_slots.detach_sum_ms,
         Rcpp::Named("stage_a_bind_ms") = diagnostics.l5_slots.stage_a_bind_ms),
       Rcpp::Named("level_component_prefill_enabled") = diagnostics.level_component_prefill_enabled,
+      Rcpp::Named("level_component_prefill_capacity_skips") = diagnostics.level_component_prefill_capacity_skips,
+      Rcpp::Named("structured_component_prefill_requested") = diagnostics.structured_component_prefill_requested,
       Rcpp::Named("structured_component_prefill_enabled") = diagnostics.structured_component_prefill_enabled,
       Rcpp::Named("structured_execution") = structured_execution,
       Rcpp::Named("vector_postback_requested") = vector_postback_requested,

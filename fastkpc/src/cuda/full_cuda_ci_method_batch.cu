@@ -477,9 +477,9 @@ __global__ void build_inchol_components_kernel(
        row += static_cast<int>(blockDim.x)) {
     diagonal[row] = 1.0;
   }
-  for (int entry = static_cast<int>(threadIdx.x);
-       entry < max_rank * max_rank;
-       entry += static_cast<int>(blockDim.x)) {
+  for (std::size_t entry = threadIdx.x;
+       entry < static_cast<std::size_t>(max_rank) * max_rank;
+       entry += blockDim.x) {
     upper[entry] = 0.0;
   }
   __shared__ double shared_pivot_value;
@@ -622,6 +622,46 @@ __global__ void center_inchol_components_kernel(double* factors,
   }
 }
 
+// At most 32 KiB of products, regardless of rank. Thread zero consumes tiles
+// in the original row-major order, keeping every dot and final sum unchanged.
+constexpr std::size_t kHsicProductTile = 4096U;
+
+std::size_t hsic_product_shared_bytes(int rank) {
+  return sizeof(double) * std::min(kHsicProductTile,
+    static_cast<std::size_t>(rank) * rank);
+}
+
+__device__ double hsic_product_sum(const double* left, const double* right,
+    int left_rank, int right_rank, int n, int max_rank,
+    const int* permutation, double* products) {
+  const std::size_t square = static_cast<std::size_t>(max_rank) * max_rank;
+  double sum = 0.0;
+  for (std::size_t begin = 0; begin < square; begin += kHsicProductTile) {
+    const std::size_t count = square - begin < kHsicProductTile ?
+      square - begin : kHsicProductTile;
+    for (std::size_t offset = threadIdx.x; offset < count; offset += blockDim.x) {
+      const std::size_t entry = begin + offset;
+      const int left_column = static_cast<int>(entry / max_rank);
+      const int right_column = static_cast<int>(entry % max_rank);
+      double dot = 0.0;
+      if (left_column < left_rank && right_column < right_rank) {
+        for (int row = 0; row < n; ++row) {
+          dot += left[row + static_cast<std::size_t>(n) * left_column] *
+            right[(permutation ? permutation[row] : row) +
+              static_cast<std::size_t>(n) * right_column];
+        }
+      }
+      products[offset] = dot * dot;
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      for (std::size_t offset = 0; offset < count; ++offset) sum += products[offset];
+    }
+    __syncthreads();
+  }
+  return sum;  // Only thread zero uses this result.
+}
+
 __global__ void reduce_inchol_self_moments_kernel(
     const double* factors,
     const int* ranks,
@@ -635,24 +675,9 @@ __global__ void reduce_inchol_self_moments_kernel(
   const int rank = ranks[component];
   const double* factor = factors +
     static_cast<std::size_t>(component) * n * max_rank;
-  const int square = max_rank * max_rank;
-  for (int entry = static_cast<int>(threadIdx.x); entry < square;
-       entry += static_cast<int>(blockDim.x)) {
-    const int left = entry / max_rank;
-    const int right = entry % max_rank;
-    double dot = 0.0;
-    if (left < rank && right < rank) {
-      for (int row = 0; row < n; ++row) {
-        dot += factor[row + static_cast<std::size_t>(n) * left] *
-          factor[row + static_cast<std::size_t>(n) * right];
-      }
-    }
-    products[entry] = dot * dot;
-  }
-  __syncthreads();
+  const double sum = hsic_product_sum(factor, factor, rank, rank, n,
+    max_rank, nullptr, products);
   if (threadIdx.x == 0) {
-    double sum = 0.0;
-    for (int entry = 0; entry < square; ++entry) sum += products[entry];
     self_moments[component] = sum;
   }
 }
@@ -686,26 +711,10 @@ __global__ void evaluate_hsic_kernel(
     static_cast<std::size_t>(left_component) * n * max_rank;
   const double* right = factors +
     static_cast<std::size_t>(right_component) * n * max_rank;
-  const int square = max_rank * max_rank;
-
-  for (int entry = static_cast<int>(threadIdx.x); entry < square;
-       entry += static_cast<int>(blockDim.x)) {
-    const int left_column = entry / max_rank;
-    const int right_column = entry % max_rank;
-    double dot = 0.0;
-    if (left_column < left_rank && right_column < right_rank) {
-      for (int row = 0; row < n; ++row) {
-        dot += left[row + static_cast<std::size_t>(n) * left_column] *
-          right[row + static_cast<std::size_t>(n) * right_column];
-      }
-    }
-    products[entry] = dot * dot;
-  }
-  __syncthreads();
+  const double observed_sum = hsic_product_sum(left, right, left_rank,
+    right_rank, n, max_rank, nullptr, products);
   if (threadIdx.x == 0) {
-    double sum = 0.0;
-    for (int entry = 0; entry < square; ++entry) sum += products[entry];
-    observed = sum / (static_cast<double>(n) * n);
+    observed = observed_sum / (static_cast<double>(n) * n);
     exceedances = include_observed != 0 ? 1 : 0;
   }
   __syncthreads();
@@ -713,24 +722,9 @@ __global__ void evaluate_hsic_kernel(
   for (int replicate = 0; replicate < replicates; ++replicate) {
     const int* permutation = permutations +
       (static_cast<std::size_t>(pair) * replicates + replicate) * n;
-    for (int entry = static_cast<int>(threadIdx.x); entry < square;
-         entry += static_cast<int>(blockDim.x)) {
-      const int left_column = entry / max_rank;
-      const int right_column = entry % max_rank;
-      double dot = 0.0;
-      if (left_column < left_rank && right_column < right_rank) {
-        for (int row = 0; row < n; ++row) {
-          dot += left[row + static_cast<std::size_t>(n) * left_column] *
-            right[permutation[row] +
-              static_cast<std::size_t>(n) * right_column];
-        }
-      }
-      products[entry] = dot * dot;
-    }
-    __syncthreads();
+    const double sum = hsic_product_sum(left, right, left_rank,
+      right_rank, n, max_rank, permutation, products);
     if (threadIdx.x == 0) {
-      double sum = 0.0;
-      for (int entry = 0; entry < square; ++entry) sum += products[entry];
       const double statistic = sum / (static_cast<double>(n) * n);
       if (statistic >= observed) ++exceedances;
     }
@@ -810,24 +804,9 @@ __global__ void initialize_hsic_permutation_pairs_kernel(
     static_cast<std::size_t>(left_component) * n * max_rank;
   const double* right = factors +
     static_cast<std::size_t>(right_component) * n * max_rank;
-  const int square = max_rank * max_rank;
-  for (int entry = static_cast<int>(threadIdx.x); entry < square;
-       entry += static_cast<int>(blockDim.x)) {
-    const int left_column = entry / max_rank;
-    const int right_column = entry % max_rank;
-    double dot = 0.0;
-    if (left_column < left_rank && right_column < right_rank) {
-      for (int row = 0; row < n; ++row) {
-        dot += left[row + static_cast<std::size_t>(n) * left_column] *
-          right[row + static_cast<std::size_t>(n) * right_column];
-      }
-    }
-    products[entry] = dot * dot;
-  }
-  __syncthreads();
+  const double sum = hsic_product_sum(left, right, left_rank,
+    right_rank, n, max_rank, nullptr, products);
   if (threadIdx.x == 0) {
-    double sum = 0.0;
-    for (int entry = 0; entry < square; ++entry) sum += products[entry];
     observed_statistics[pair] = sum / (static_cast<double>(n) * n);
     exceedances[pair] = include_observed != 0 ? 1 : 0;
   }
@@ -859,25 +838,9 @@ __global__ void evaluate_hsic_permutation_replicates_kernel(
     static_cast<std::size_t>(right_component) * n * max_rank;
   const int* permutation = permutations +
     (static_cast<std::size_t>(pair) * replicates + replicate) * n;
-  const int square = max_rank * max_rank;
-  for (int entry = static_cast<int>(threadIdx.x); entry < square;
-       entry += static_cast<int>(blockDim.x)) {
-    const int left_column = entry / max_rank;
-    const int right_column = entry % max_rank;
-    double dot = 0.0;
-    if (left_column < left_rank && right_column < right_rank) {
-      for (int row = 0; row < n; ++row) {
-        dot += left[row + static_cast<std::size_t>(n) * left_column] *
-          right[permutation[row] +
-            static_cast<std::size_t>(n) * right_column];
-      }
-    }
-    products[entry] = dot * dot;
-  }
-  __syncthreads();
+  const double sum = hsic_product_sum(left, right, left_rank,
+    right_rank, n, max_rank, permutation, products);
   if (threadIdx.x == 0) {
-    double sum = 0.0;
-    for (int entry = 0; entry < square; ++entry) sum += products[entry];
     const double statistic = sum / (static_cast<double>(n) * n);
     if (statistic >= observed_statistics[pair]) {
       atomicAdd(exceedances + pair, 1);
@@ -926,7 +889,7 @@ void validate_static_request(const FullCudaCiMethodStaticRequest& request,
     throw std::runtime_error("strict CI method batch request is malformed");
   }
   if (request.alpha != 0.1 || request.index != 1.0 ||
-      request.num_col < 1 || request.num_col > 64 ||
+      request.num_col < 1 || request.num_col >= batch.n ||
       !std::isfinite(request.hsic_sig) || request.hsic_sig <= 0.0) {
     throw std::runtime_error("strict CI method batch numeric contract changed");
   }
@@ -1338,7 +1301,7 @@ class FullCudaCiMethodExecutionContext {
         pair_start_(true), pair_stop_(true), compact_start_(true),
         compact_stop_(true),
         consumer_completion_(false) {
-    if (n_ < 6 || device_id_ < 0 || num_col_ < 1 || num_col_ > 64 ||
+    if (n_ < 6 || device_id_ < 0 || num_col_ < 1 || num_col_ >= n_ ||
         (ci_method_ != "dcc.perm" && ci_method_ != "hsic.gamma" &&
          ci_method_ != "hsic.perm") ||
         ((ci_method_ == "dcc.perm" || ci_method_ == "hsic.perm") &&
@@ -2297,8 +2260,7 @@ MethodPreparationTicket submit_method_preparation(
         diagnostics.component_cache_persistent_gather_d2d_bytes +=
           sizeof(double) * factor_stride + sizeof(int);
       }
-      const std::size_t shared_bytes = sizeof(double) *
-        static_cast<std::size_t>(max_rank) * max_rank;
+      const std::size_t shared_bytes = hsic_product_shared_bytes(max_rank);
       if (component_misses.size() == component_count) {
         check_cuda(cudaMemsetAsync(
           factors, 0, sizeof(double) * factor_values, stream.get()),
@@ -2607,8 +2569,7 @@ FullCudaCiMethodBatchResult finalize_method_from_permutation(
       check_cuda(cudaGetLastError(), "launch strict dcc.perm pairs");
     } else {
       const int max_rank = std::min(state->request.num_col, state->batch.n);
-      const std::size_t shared_bytes = sizeof(double) *
-        static_cast<std::size_t>(max_rank) * max_rank;
+      const std::size_t shared_bytes = hsic_product_shared_bytes(max_rank);
       double* factors = static_cast<double*>(
         state->active_context->method_buffers_[0].get());
       int* ranks = static_cast<int*>(

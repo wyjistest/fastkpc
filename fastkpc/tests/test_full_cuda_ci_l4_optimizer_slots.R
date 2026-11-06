@@ -26,12 +26,12 @@ reject <- function(changes,pattern,input=data) {
     identical(before,fastkpc_full_cuda_phase35_vertical_resource_snapshot()[fields]))
 }
 reject(c(FASTKPC_DCC_GAMMA_L4_OPTIMIZER_SLOTS="invalid"),"must be 0 or 1")
-reject(c(FASTKPC_DCC_GAMMA_L4_OPTIMIZER_WORKERS32="0"),"L4 optimizer slots require canonical S2")
-reject(c(FASTKPC_MULTI_PENALTY_STATUS_WAIT_BEFORE_D2H="0"),"L4 optimizer slots require canonical S2")
-reject(c(FASTKPC_DCC_GAMMA_EXACT_PRIMARY_FIXED_REUSE="0"),"L4 optimizer slots require canonical S2")
-reject(c(FASTKPC_DCC_GAMMA_L2_COMPONENT_PREFILL="0"),"L4 optimizer slots require canonical S2")
-reject(c(FASTKPC_PHASE10_SETUP_OPTIMIZER_PIPELINE="1"),"L4 optimizer slots require canonical S2")
+reject(c(FASTKPC_DCC_GAMMA_L4_OPTIMIZER_WORKERS32="0"),"L4 optimizer slots require level prefill")
+reject(c(FASTKPC_MULTI_PENALTY_STATUS_WAIT_BEFORE_D2H="0"),"L4 optimizer slots require level prefill")
+reject(c(FASTKPC_DCC_GAMMA_EXACT_PRIMARY_FIXED_REUSE="0"),"L4 optimizer slots require level prefill")
+reject(c(FASTKPC_DCC_GAMMA_L2_COMPONENT_PREFILL="0"),"L4 optimizer slots require level prefill")
+reject(c(FASTKPC_PHASE10_SETUP_OPTIMIZER_PIPELINE="1"),"L4 optimizer slots require level prefill")
 reject(c(FASTKPC_DCC_GAMMA_LEVEL_COMPONENT_PREFILL="0",
   FASTKPC_DCC_GAMMA_STRUCTURED_COMPONENT_PREFILL="0",
-  FASTKPC_DCC_GAMMA_L2_COMPONENT_PREFILL="0"),"L4 optimizer slots require canonical S2",data[-1L,])
+  FASTKPC_DCC_GAMMA_L2_COMPONENT_PREFILL="0"),"L4 optimizer slots require level prefill",data[-1L,])
 cat("PASS seven L4 slot configuration rejection cases and resource closure\n")

@@ -249,8 +249,8 @@ fastkpc_full_cuda_phase35_legacy_eig_batch_request <- function(
     component_capacity = component_capacity
   )
   if (!is.integer(num_col) || length(num_col) != 1L || is.na(num_col) ||
-      !is.null(attributes(num_col)) || num_col != 35L) {
-    stop("legacy eig batch requires bare canonical num_col 35L",
+      !is.null(attributes(num_col)) || num_col < 1L) {
+    stop("legacy eig batch requires a bare positive integer num_col",
          call. = FALSE)
   }
   payload <- paste(c(

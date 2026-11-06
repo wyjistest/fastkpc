@@ -9,9 +9,11 @@
 namespace fastkpc {
 
 // Owned pageable input. Keep it alive until the slot's stream has drained.
-// This deliberately covers only the qualified 351 x 28, three-penalty shape.
+// The additive model fixes q and penalty_count; observation count and target
+// capacity belong to the input, never to a development dataset.
 struct MultiPenaltyGcvL3Geometry {
-  int n = 351;
+  int n = 0;
+  int target_capacity = 0;
   int q = 28;
   int penalty_count = 3;
   std::vector<double> X, qr, tau, r, roots, matrices, initial_log_sp;
@@ -20,8 +22,9 @@ struct MultiPenaltyGcvL3Geometry {
 
 inline void validate_multi_penalty_gcv_l3_geometry(
     const MultiPenaltyGcvL3Geometry& g) {
-  bool valid = g.n == 351 && g.q == 28 && g.penalty_count == 3 &&
-    g.X.size() == 351U * 28U && g.qr.size() == g.X.size() &&
+  bool valid = g.n > g.q && g.q == 28 && g.penalty_count == 3 &&
+    g.target_capacity >= 2 && g.target_capacity <= 64 &&
+    g.X.size() == static_cast<std::size_t>(g.n) * g.q && g.qr.size() == g.X.size() &&
     g.tau.size() == 28U && g.r.size() == 28U * 28U &&
     g.pivot.size() == 28U && g.ranks.size() == 3U &&
     g.offsets.size() == 3U && g.initial_log_sp.size() == 3U &&
@@ -41,7 +44,7 @@ inline void validate_multi_penalty_gcv_l3_geometry(
   }
   valid = valid && rank == 24 && 28 + rank <= 128 &&
     g.roots.size() == static_cast<std::size_t>(28 * rank);
-  if (!valid) throw std::runtime_error("L3 slot geometry is outside the qualified envelope");
+  if (!valid) throw std::runtime_error("L3 slot geometry violates the additive model or buffer capacity");
 }
 
 // A failed upload requires draining and discarding the slot; callers must not

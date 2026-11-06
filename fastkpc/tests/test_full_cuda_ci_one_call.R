@@ -134,6 +134,7 @@ assert_optimizer_attribution <- function(summary, label) {
     "unique_target_key_count", "consumed_unique_target_key_count",
     "unconsumed_unique_target_key_count",
     "singleton_skipped_request_count", "singleton_skipped_target_count",
+    "optimizer_requested_concurrency", "optimizer_worker_count", "optimizer_peak_host_calls",
     "optimizer_host_ms", "batch_wall_ms"
   )
   close_sum <- function(left, right) {
@@ -412,7 +413,7 @@ invalid_num_col <- tryCatch(
     alpha = 0.1,
     max_conditioning_size = 0L,
     index = 1,
-    numCol = 7L,
+    numCol = 0L,
     compatible_cuda_strict = TRUE
   ),
   error = function(error) error
@@ -420,7 +421,7 @@ invalid_num_col <- tryCatch(
 assert_true(
   inherits(invalid_num_col, "error") &&
     grepl("numCol", conditionMessage(invalid_num_col), fixed = TRUE),
-  "Phase 9 strict route must fail closed outside qualified numCol=35"
+  "strict route must reject a nonpositive numCol"
 )
 
 cat(

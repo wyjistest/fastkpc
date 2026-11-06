@@ -2321,6 +2321,11 @@ precision_run_skeleton_full_cuda_native <- function(
   ci_method <- match.arg(ci_method)
   data <- as.matrix(data)
   storage.mode(data) <- "double"
+  if (!is.numeric(numCol) || length(numCol) != 1L || !is.finite(numCol) ||
+      numCol != floor(numCol) || numCol < 1 || numCol >= nrow(data)) {
+    stop("numCol must be one integer, positive and less than sample size",
+         call. = FALSE)
+  }
   max_conditioning_size <- fastkpc_resolve_max_conditioning_size(
     max_conditioning_size, ncol(data)
   )

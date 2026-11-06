@@ -9733,6 +9733,18 @@ extern "C" SEXP C_full_cuda_ci_native_setup(SEXP conditioning_s) {
   END_RCPP
 }
 
+static int full_cuda_ci_num_col(SEXP value, int n) {
+  if ((TYPEOF(value) != INTSXP && TYPEOF(value) != REALSXP) ||
+      Rf_xlength(value) != 1) {
+    Rcpp::stop("numCol must be one integer, positive and less than sample size");
+  }
+  const double rank = Rcpp::as<double>(value);
+  if (!std::isfinite(rank) || rank != std::floor(rank) || rank < 1 || rank >= n) {
+    Rcpp::stop("numCol must be one integer, positive and less than sample size");
+  }
+  return static_cast<int>(rank);
+}
+
 extern "C" SEXP C_full_cuda_ci_one_call_skeleton(
     SEXP data_s,
     SEXP alpha_s,
@@ -9750,7 +9762,7 @@ extern "C" SEXP C_full_cuda_ci_one_call_skeleton(
     Rcpp::as<double>(alpha_s),
     Rcpp::as<int>(max_conditioning_size_s),
     Rcpp::as<double>(index_s),
-    Rcpp::as<int>(num_col_s),
+    full_cuda_ci_num_col(num_col_s, Rcpp::NumericMatrix(data_s).nrow()),
     Rcpp::as<std::string>(trace_level_s),
     Rcpp::as<bool>(compatible_cuda_strict_s));
   END_RCPP
@@ -9794,7 +9806,7 @@ extern "C" SEXP C_full_cuda_ci_one_call_skeleton_method(
     Rcpp::as<double>(alpha_s),
     Rcpp::as<int>(max_conditioning_size_s),
     Rcpp::as<double>(index_s),
-    Rcpp::as<int>(num_col_s),
+    full_cuda_ci_num_col(num_col_s, Rcpp::NumericMatrix(data_s).nrow()),
     Rcpp::as<std::string>(trace_level_s),
     Rcpp::as<bool>(compatible_cuda_strict_s),
     method_options);
@@ -14084,7 +14096,10 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
       level_dcov_materialize_ms,
       level_dcov_call_ms,
       elapsed_ms_since(level_start));
-    if (pcalg_done) break;
+    // Match pcalg's any(G) condition after stable deletions are applied.
+    if (pcalg_done ||
+        std::none_of(adjacency.begin(), adjacency.end(),
+                     [](int value) { return value != 0; })) break;
   }
 
   Rcpp::LogicalVector task_deleted_out(task_deleted.size());

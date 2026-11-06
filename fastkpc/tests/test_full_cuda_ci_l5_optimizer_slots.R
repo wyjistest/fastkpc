@@ -22,8 +22,8 @@ Sys.setenv(FASTKPC_DCC_GAMMA_L5_OPTIMIZER_SLOTS="1",
   FASTKPC_DCC_GAMMA_STRUCTURED_COMPONENT_PREFILL="1",
   FASTKPC_DCC_GAMMA_L2_COMPONENT_PREFILL="1",
   FASTKPC_MULTI_PENALTY_STATUS_WAIT_BEFORE_D2H="0")
-reject("L5 optimizer slots require canonical S2")
+reject("L5 optimizer slots require level prefill")
 Sys.setenv(FASTKPC_MULTI_PENALTY_STATUS_WAIT_BEFORE_D2H="1",
   FASTKPC_DCC_GAMMA_EXACT_PRIMARY_FIXED_REUSE="0")
-reject("L5 optimizer slots require canonical S2")
+reject("L5 optimizer slots require level prefill")
 cat("PASS L5 slot configuration rejection and resource closure\n")

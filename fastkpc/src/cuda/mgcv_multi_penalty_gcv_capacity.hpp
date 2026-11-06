@@ -24,8 +24,8 @@ enum class MultiPenaltyGcvCapacityBucket {
 class MultiPenaltyGcvCapacityPrepared;
 class MultiPenaltyGcvCapacityResidualBatch;
 
-// Default-off L5 runtime experiment. Each slot has capacity eight; calls still
-// use the original target counts. A live residual lease forbids rebinding.
+// Default-off L5 runtime experiment. Geometry supplies the slot capacity;
+// calls use their unpadded target counts. A live residual lease forbids rebinding.
 std::shared_ptr<MultiPenaltyGcvCapacityPrepared>
 create_multi_penalty_gcv_capacity_l5_slot(
     const MultiPenaltyGcvL5Geometry& geometry, int device_id);
@@ -35,7 +35,7 @@ void rebind_multi_penalty_gcv_capacity_l5_slot(
 void drain_multi_penalty_gcv_capacity_l5_slot(
     const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& prepared);
 
-// Default-off L4 experiment: capacity eighteen, original unpadded target counts.
+// Default-off L4 experiment: geometry capacity, unpadded target counts.
 // Drain and discard after any failed rebind. Never reuse partially uploaded geometry.
 std::shared_ptr<MultiPenaltyGcvCapacityPrepared>
 create_multi_penalty_gcv_capacity_l4_slot(
@@ -46,7 +46,7 @@ void rebind_multi_penalty_gcv_capacity_l4_slot(
 void drain_multi_penalty_gcv_capacity_l4_slot(
     const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& prepared);
 
-// Default-off L6 experiment: capacity five, original two/three/five-target cohorts.
+// Default-off L6 experiment: geometry capacity, unpadded target counts.
 // Drain and discard after any failed rebind; a live lease forbids reuse.
 std::shared_ptr<MultiPenaltyGcvCapacityPrepared>
 create_multi_penalty_gcv_capacity_l6_slot(
@@ -57,7 +57,7 @@ void rebind_multi_penalty_gcv_capacity_l6_slot(
 void drain_multi_penalty_gcv_capacity_l6_slot(
     const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& prepared);
 
-// Default-off L3 experiment: capacity 33, original unpadded cohorts 2 through 33.
+// Default-off L3 experiment: geometry capacity, unpadded target counts.
 // Drain and discard after any failed rebind; a live lease forbids reuse.
 std::shared_ptr<MultiPenaltyGcvCapacityPrepared>
 create_multi_penalty_gcv_capacity_l3_slot(
