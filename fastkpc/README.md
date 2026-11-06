@@ -2,26 +2,49 @@
 
 Staged fast kPC backend for this workspace.
 
-This directory is intentionally separate from `kpcalg/R`. The legacy package
-files stay unchanged while the fast backend is developed and validated.
+This directory is separate from `kpcalg/R`. This Git handoff preserves the
+original legacy reference. A local `dcov.gamma` scalar-diagonal correction used
+in the 2026-11-06 qualification remains uncommitted; the report retains its
+source identity and distinguishes it from the original R reference.
+
+Runtime/tool commit `8d139b8` and the local native are linked in the
+[2026-11-06 source attestation](docs/PHASE10_SOURCE_ATTESTATION_20261106.json).
+It verifies 107 build inputs and 97 fastkpc R files against Git, and records the
+excluded legacy R dependency separately. No GPU campaign was rerun for this handoff.
 
 ## Full-CUDA legacy-compatible skeleton and WAN-PDAG candidate
 
-For the current committed source, local native and evidence boundary, start with the
+The [2026-11-02 general-shape correction](docs/PHASE10_GENERAL_SHAPES_20261102.md)
+removes fixed dataset dimensions from the experimental structured/slot dispatch
+and sizes workspaces from actual inputs. Qualification and speed are checked
+separately on multiple shapes; the historical 351x48 timing is not a general
+performance guarantee. Existing alpha/index and model limits still apply;
+the [2026-11-06 rank correction](docs/PHASE10_NUMCOL_GENERALIZATION_20261106.md)
+removes the fixed `numCol=35` requirement and preserves the caller/default rank.
+Qualified development native `2727ef51…9198301` passes 16 input/rank cases in
+50 CPU/GPU runs (22,441 GPU CI comparisons), 28 other-method cases, and the
+complete canonical regression. Three complete real inputs use default ranks
+17/24/30; the public 500x50 WAN-PDAG entry uses default 50. The prior
+`476ad65e…5e5a37b` twelve-input / 72-run evidence used explicit rank 35: its
+two workload speedups and 3.8% public-500x50 regression keep that historical
+scope. Switches remain opt-in; this correction establishes no new speed median.
+
+For the preceding runtime's committed source and historical evidence, see the
 [2026-10-30 development handoff](docs/PHASE10_DEVELOPMENT_HANDOFF_20261030.md).
 Build fix `89a8099` and runtime `ae3687f` match the measured source closure;
 the [isolated capacity acceptance](docs/PHASE10_STRUCTURED_ROWS_ISOLATED_20261030.md)
 retains its original precommit run identity.
 [Build-entry qualification](docs/PHASE10_BUILD_CONSISTENCY_20261029.md) passes
 full/incremental native identity and numerical gates. The structured row-only
-change is installed as native `b2b79fc6…e135b12b`: **GO_CAPACITY**, saving
+change was installed as native `b2b79fc6…e135b12b`: **GO_CAPACITY**, saving
 601.57 MiB of requested pool storage. L6 checkpoint headroom above the 2 GiB gate
-is now 699.125 MiB. Six isolated runs pass numerical, capacity, resource and
+was 699.125 MiB. Six isolated runs pass numerical, capacity, resource and
 predeclared outer non-regression gates; matched OFF/ON medians are
 **283.985/283.328 seconds**. Speed is **NOT_PROVEN** (0.23% observed decrease,
 2/3 paired wins). The capacity version's 283.328-second median is local
 source-closure development evidence, not a performance run from a clean checkout or promotion.
-The fastest slot configuration is limited to the qualified `dcc.gamma` 351 x 48 workload.
+Those historical slot timings cover the specified `dcc.gamma` 351 x 48 input;
+the current multi-shape implementation has a separate validation record above.
 
 The [2026-10-29 handoff](docs/PHASE10_DEVELOPMENT_HANDOFF_20261029.md) keeps
 runtime `c469ac5`, attestation `e15be9d`, and **290.491 seconds** as historical
@@ -78,7 +101,6 @@ skeleton <- fastkpc_compatible_cuda_skeleton(
     compatible_cuda_strict = TRUE,
     max_conditioning_size = Inf,
     index = 1,
-    numCol = 35L,
     trace_level = "logical"
   )
 )
@@ -94,7 +116,6 @@ result <- fastkpc_compatible_cuda_wanpdag(
   options = list(
     max_conditioning_size = Inf,
     index = 1,
-    numCol = 35L,
     trace_level = "logical",
     ci_method = "hsic.perm",
     hsic_params = list(sig = 1),
@@ -119,12 +140,13 @@ response-independent setup construction, CUDA target-specific GCV and stable
 residual solves, device-resident CUDA dCov/HSIC components, method-specific
 gamma or permutation p-values, and canonical compact-result replay.
 
-Qualified semantic envelope:
+Public input and model contract:
 
 ```text
-input: finite binary64 matrix; n > 35; 2 <= p <= 64
+input: finite binary64 matrix; n > 5; 2 <= p <= 64
 alpha: exactly 0.1
-index / numCol: 1 / 35
+index: 1
+numCol: integer, 1 <= numCol < n; default floor(n / 10)
 maximum conditioning size: defaults to Inf and resolves to p - 2
 multi-penalty CUDA capacity: |S| through 62, with q = 1 + 9|S| < n
 model: Gaussian, identity, unweighted, zero offset
@@ -132,6 +154,19 @@ smooth route: joint thin-plate smooth for |S| <= 2
               additive thin-plate smooths for |S| > 2
 graph stage: CUDA skeleton, optionally followed by kpcalg-authority WAN-PDAG
 ```
+
+Omitting `numCol` in these examples preserves the original default: 500 rows
+use 50 and 351 rows use 35. For n < 10, that default is zero and an explicit
+valid rank is required. This parameter is the CI spectral/low-rank rank, not
+the number of data columns. Structured dispatch supports k <= 64 and its
+documented sample-size constraints; other ranks/shapes use dense CUDA without
+clamping k. The validation report lists the inputs actually checked.
+
+For `dcc.gamma` at rank one, the original R `diag(single_value)` construction
+errors. GPU skeleton checks use independent CPU full eig; the additional R
+comparison used the local patch. Rank-one CPU-authority orientation is not
+qualified with the original R reference. The two patched-R WAN-PDAG fixtures
+ended with empty graphs and made no orientation CI calls.
 
 This is a compatible implementation of that exact subset, not a full mgcv
 clone. Unsupported values fail before canonical replay. Strict skeleton
@@ -1078,7 +1113,7 @@ WAN-PDAG orientation results expose `orientation$ci_backend`,
 
 Validation reports include `hsic_cuda_backend_diagnostics.csv`,
 `hsic_cuda_cpu_fallbacks.csv`, and `hsic_cuda_perf.csv`.
-The legacy `kpcalg/R/*.R` files are not modified.
+The HSIC backend retains the legacy HSIC R functions.
 
 Validation campaigns and reports include `ci_method`, `ci_method_diffs.csv`,
 `ci_method_diagnostics.csv`, `hsic_cuda_backend_diagnostics.csv`,
@@ -1236,7 +1271,7 @@ run_fastkpc_validation_campaign(
 
 Generated reports include `orientation_device_diffs.csv` and
 `orientation_device_diagnostics.csv`.
-`kpcalg/R` files are not modified by fastkpc staged backend work.
+These orientation backends retain the legacy orientation functions.
 
 ## CUDA Build
 
@@ -1500,8 +1535,9 @@ production authority when process-level parity is required. Native CPU/CUDA
 orientation remains useful for development and small fixtures, but is not
 strict-compatible on every canonical method.
 
-The orientation engine lives under `fastkpc/src` and does not modify legacy
-package files. kpcalg/R/*.R files are not modified, and kpcalg::kpc() is not replaced.
+The orientation engine lives under `fastkpc/src`; kpcalg::kpc() is not replaced.
+The Git reference keeps `kpcalg/R` unchanged. The separate local rank-one R
+experiment and its evidence boundary are documented in the qualification report.
 
 ## WAN-PDAG API
 
@@ -1514,7 +1550,6 @@ fastkpc_compatible_cuda_wanpdag(
   alpha = 0.1,
   options = list(
     max_conditioning_size = Inf,
-    numCol = 35L,
     trace_level = "logical",
     ci_method = "dcc.perm",
     permutation_params = list(
@@ -1595,7 +1630,7 @@ CPU-vs-CUDA WAN-PDAG diff, and a linear-vs-fastSpline WAN-PDAG diff.
 
 - WAN-PDAG orientation is opt-in.
 - `kpcalg::kpc()` is not replaced.
-- kpcalg/R/*.R files are not modified.
+- Legacy WAN-PDAG orientation functions remain the strict authority.
 - HSIC gamma and HSIC permutation tests are implemented as opt-in native CPU
   CI methods and as CUDA HSIC kernels for supported CUDA runs.
 - CUDA orientation residual/dCov execution is opt-in and limited to fastSpline.
@@ -1732,7 +1767,7 @@ Rscript fastkpc/tools/run_validation_campaign.R \
 ## Public Wrapper Known Limits
 
 - kpcalg::kpc() is not replaced.
-- kpcalg/R/*.R files are not modified.
+- The legacy kpc entrypoint and orientation functions are retained.
 - CUDA residual kernels are opt-in.
 - Validation campaign reports graph differences; it does not force equality.
 - Legacy comparison requires pcalg and graph.
@@ -1821,7 +1856,7 @@ Generated reports include `residual_device_diffs.csv`.
 - CUDA residual fallback is explicit and may report `cuda-fallback-cpu`.
 - CUDA WAN-PDAG orientation residuals are opt-in and limited to fastSpline.
 - kpcalg::kpc() is not replaced.
-- kpcalg/R/*.R files are not modified.
+- Legacy residual-fitting functions are unchanged.
 
 ## mgcv-Compatible Residual Oracle And Hybrid Verification
 

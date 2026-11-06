@@ -6,22 +6,48 @@ backend work in one workspace. The active fast backend code is under
 
 ## Full-CUDA compatible skeleton and WAN-PDAG candidate
 
-Current committed source and evidence identities are recorded in the
+Development priority was corrected on 2026-11-02: production optimizations must
+dispatch on model dimensions and resource capacity, with validation across
+multiple input shapes. The 351 x 48 input is one regression case. See the
+[general-shape implementation and validation](fastkpc/docs/PHASE10_GENERAL_SHAPES_20261102.md).
+The [2026-11-06 rank qualification](fastkpc/docs/PHASE10_NUMCOL_GENERALIZATION_20261106.md)
+also removes the fixed `numCol=35` requirement. Qualified development native
+`2727ef51…9198301` passes 16 input/rank cases in 50 CPU/GPU runs, including three
+complete real inputs and the actual 500x50 default rank 50, plus other-method
+and complete canonical regressions. The previous `476ad65e…5e5a37b` twelve-input /
+72-run evidence retains its explicit rank-35 scope. Speed depends on workload;
+switches remain opt-in and no new performance median is claimed. Historical
+timings below retain their original input and binary scope.
+
+The Git handoff preserves the original `kpcalg/R` reference. The November 6 local
+qualification used a separate, uncommitted scalar-diagonal correction in
+`dcov.gamma`; its receipts retain that R source identity. Rank-one GPU results
+were checked against independent CPU full eig and the patched R function, not
+the original R function, which errors at that rank. Rank-one CPU-authority
+orientation remains unqualified with the original R reference. See the rank
+report for this reproducibility boundary.
+
+Runtime/tool commit `8d139b8` is bound to the local native by the
+[November 6 source attestation](fastkpc/docs/PHASE10_SOURCE_ATTESTATION_20261106.json):
+107 build inputs and 97 fastkpc R files match Git; the local legacy R patch is
+listed separately. This handoff did not rerun the GPU campaign.
+
+The preceding runtime's committed source and evidence identities are recorded in the
 [2026-10-30 development handoff](fastkpc/docs/PHASE10_DEVELOPMENT_HANDOFF_20261030.md).
 Build fix `89a8099` and runtime `ae3687f` match the measured source closure;
 the [isolated capacity acceptance](fastkpc/docs/PHASE10_STRUCTURED_ROWS_ISOLATED_20261030.md)
 retains its original precommit run identity.
 The [build-entry qualification](fastkpc/docs/PHASE10_BUILD_CONSISTENCY_20261029.md)
 passes full/incremental native identity and numerical gates. The structured
-row-only change is now installed as native `b2b79fc6…e135b12b`: **GO_CAPACITY**,
-with 601.57 MiB less requested pool storage and 699.125 MiB of L6 checkpoint
+row-only change was installed as native `b2b79fc6…e135b12b`: **GO_CAPACITY**,
+with 601.57 MiB less requested pool storage and a recorded 699.125 MiB of L6 checkpoint
 headroom above the 2 GiB gate. All six isolated runs pass numerical, capacity,
 resource and predeclared outer non-regression gates. Matched OFF/ON medians are
 **283.985/283.328 seconds**; speed is **NOT_PROVEN** (0.23% observed decrease,
 2/3 paired wins). The capacity version's 283.328-second median is local
 source-closure development evidence, not a performance run from a clean checkout or promotion.
-The fastest slot configuration remains qualified for the specified `dcc.gamma`,
-351 x 48 canonical workload, not arbitrary inputs.
+Those historical slot results cover the specified `dcc.gamma` 351 x 48 input.
+The current multi-shape implementation and its separate evidence are linked above.
 
 The [2026-10-29 handoff](fastkpc/docs/PHASE10_DEVELOPMENT_HANDOFF_20261029.md)
 preserves runtime `c469ac5`, attestation `e15be9d`, and the historical
@@ -58,7 +84,6 @@ skeleton <- fastkpc_compatible_cuda_skeleton(
     compatible_cuda_strict = TRUE,
     max_conditioning_size = Inf,
     index = 1,
-    numCol = 35L,
     trace_level = "logical"
   )
 )
@@ -74,7 +99,6 @@ result <- fastkpc_compatible_cuda_wanpdag(
   options = list(
     max_conditioning_size = Inf,
     index = 1,
-    numCol = 35L,
     trace_level = "logical",
     ci_method = "hsic.gamma",
     hsic_params = list(sig = 1)
@@ -92,18 +116,26 @@ for `|S| > 2`, target-specific GCV selection, CUDA residual formation, and
 legacy-compatible CUDA evaluation for `dcc.gamma`, `dcc.perm`, `hsic.gamma`,
 and `hsic.perm`. It is not a general mgcv clone.
 
-The currently qualified public envelope is deliberately narrow:
+The public input contract is:
 
 ```text
-finite binary64 matrix; n > 35; 2 <= p <= 64
-alpha = 0.1; index = 1; numCol = 35
+finite binary64 matrix; n > 5; 2 <= p <= 64
+alpha = 0.1; index = 1
+numCol: caller-specified integer, 1 <= numCol < n; default floor(n / 10)
 max_conditioning_size defaults to Inf and resolves to p - 2
 additive CUDA capacity through |S| = 62, subject to q = 1 + 9|S| < n
 Gaussian family; identity link; unweighted; zero offset
 CUDA skeleton plus optional kpcalg-authority WAN-PDAG orientation
 ```
 
-Strict skeleton mode fails closed outside that envelope. It does not silently
+The examples omit `numCol`: 500 rows use rank 50, while 351 rows use rank 35.
+An explicit rank is required when `floor(n / 10)` is zero. Rank describes the
+CI spectral/low-rank approximation, not the number of input variables. A rank
+outside a structured kernel's capacity uses the dense GPU implementation without
+changing the requested parameter. Qualification covers the recorded inputs in
+the [rank validation report](fastkpc/docs/PHASE10_NUMCOL_GENERALIZATION_20261106.md).
+
+Strict skeleton mode fails closed outside the input/model contract. It does not silently
 call legacy mgcv, a CPU numerical skeleton CI path, `fastSplineCUDA`, or another
 approximate backend. C++ owns canonical skeleton replay; CUDA owns repeated
 skeleton CI work. When WAN-PDAG is requested, kpcalg CPU orientation is an

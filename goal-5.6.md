@@ -1,12 +1,58 @@
 # Full-CUDA Legacy-Compatible CI Goal Document
 
+> **2026-11-06 Git handoff:** Runtime/tools are committed as `8d139b8`.
+> [Source attestation](fastkpc/docs/PHASE10_SOURCE_ATTESTATION_20261106.json)
+> matches 107 production build inputs and 97 fastkpc R dependencies to Git,
+> verifies 44 installed objects and 331 sealed evidence files, and explicitly
+> separates the uncommitted legacy R patch. This is source binding of existing
+> local receipts, not a rerun or clean-checkout qualification.
+
+> **2026-11-06 numCol correction qualified:** Development native
+> `2727ef51…9198301` removes the historical fixed `numCol=35` requirement.
+> Caller rank is preserved; the existing default remains `floor(n/10)`.
+> Sixteen input/rank cases pass 50 fresh CPU/GPU runs, including three complete
+> real inputs at default 17/24/30 and public 500x50 at default 50. The 34 GPU
+> runs compare 22,441 CIs, with maximum error `2.77605716192397e-12` and all
+> graph/order/count/RNG/authority/resource gates intact. Other methods pass
+> 28 cases / 792 CIs; the 240,498-CI canonical regression preserves prior
+> GPU CI/pMax bits and all 34 gates. The native empty-graph stopping correction
+> passes rank-one checks against independent CPU full eig and a locally patched
+> R reference. That R patch is excluded from this Git handoff; receipts keep its
+> identity, and rank-one CPU-authority orientation with original R is unqualified.
+> Single canonical
+> elapsed is 286.700 s on a shared host with exclusive GPU1, not a new median.
+> [Implementation, identities and evidence](fastkpc/docs/PHASE10_NUMCOL_GENERALIZATION_20261106.md).
+> Phase 10 ACTIVE, candidate NOT_FROZEN, holdout SEALED and recommended=false
+> remain unchanged; prior rank-35 receipts are not relabeled as default-rank evidence.
+
+> **2026-11-02 execution correction:** General input support takes priority over
+> further single-benchmark tuning. Production optimization dispatch must use
+> actual dimensions, numerical-model constraints and bounded resources; remove
+> dataset-sized workspace assumptions and captured cohort whitelists. Require
+> correctness and separate OFF/ON results across shapes, densities and search
+> depths. The 351x48 input remains one regression case. See the
+> [implementation and validation record](fastkpc/docs/PHASE10_GENERAL_SHAPES_20261102.md).
+> Historical 180/120-second gates and timings do not establish a general-input
+> performance guarantee; no holdout or promotion status changes in this work.
+
+> **2026-11-02 prior rank-35 correction and installation:** Native
+> `476ad65e…5e5a37b` passes 72 runs over twelve inputs (50,610 CI comparisons,
+> maximum absolute error `8.6844e-12`), plus the complete 240,498-CI canonical
+> regression with exact prior GPU CI/pMax bits and final PDAG/RNG parity.
+> The single canonical elapsed is 291.429 s, not a new repeated median.
+> Per-input medians improve 16.62% on real 300x10 and 21.83% on dense synthetic
+> 500x8; public synthetic 500x50 is 3.80% slower with the optional combination.
+> Actual dimensions, model constraints and capacity now govern prefill/slot
+> eligibility. Defaults remain off; Phase 10 ACTIVE and all promotion states
+> remain unchanged. See the linked correction report for evidence identities.
+
 > **Campaign:** replace the complete numerical conditional-independence data plane used by the KPC skeleton with a legacy-compatible CUDA implementation.
 >
 > **Document origin baseline:** `main` at `7b36668` (`feat: add CUDA Spectra handle projection primitive`).
 >
 > **2026-10-30 Git handoff — build consistency and capacity closure:** Build-fix commit `89a8099` and runtime/tool commit `ae3687f` are bound by the [handoff](fastkpc/docs/PHASE10_DEVELOPMENT_HANDOFF_20261030.md) and [source attestation](fastkpc/docs/PHASE10_SOURCE_ATTESTATION_20261030.json). All 107 production inputs match the corresponding committed blobs; 25 original qualification files and both tested R cleanup fixes retain their authenticated bytes. Two new read-only Git verification files are recorded separately. The final manifest's 962 entries and the shared-host manifest's 419 entries reverify, including exactly one explicit old-live-native mapping to the unchanged archived original. Installed native remains `b2b79fc6…e135b12b`, with all 44 linked objects and generated includes verified. **GO_CAPACITY / speed NOT_PROVEN** remains the decision: 601.567 MiB less requested storage, 699.125 MiB L6 margin above 2 GiB, matched OFF/ON medians **283.985/283.328 s**. Original receipts retain HEAD `e15be9d` and precommit source-closure identity; no rebuild or GPU campaign was rerun. The 290.491-second result keeps its historical native identity. Defaults, q55 deferral, recover/L8 STOP, Phase 10 ACTIVE, candidate NOT_FROZEN, holdout SEALED and recommended=false are unchanged. No new optimization is opened by this repository closure.
 >
-> **Historical execution states below:** statements that source was uncommitted, installation was pending or work had not started describe their recorded time. Current repository identity is the October 30 Git handoff above.
+> **Historical execution states below:** statements that source was uncommitted, installation was pending or work had not started describe their recorded time. The October 30 Git handoff preserves the preceding runtime; the November 2 and November 6 qualifications retain their original local native and R source identities in the reports above.
 >
 > **2026-10-30 structured row-only isolated acceptance — capacity GO, installed:** The [completed original campaign](fastkpc/docs/PHASE10_STRUCTURED_ROWS_ISOLATED_20261030.md) preserves both qualified natives, the OFF1/ON1/ON2/OFF2/OFF3/ON3 sequence and all thresholds. Six isolated GPU1 runs, with both GPUs free of external compute, give OFF **283.985/285.091/283.307 s** and ON **283.328/290.024/283.214 s**; medians **283.985/283.328 s**, ratio **0.997686498**, 2/3 paired wins. Predeclared outer non-regression PASS; **speed NOT_PROVEN**. Every run preserves all 240,498 CI/pMax bits, task/deletion/skeleton/sepset/count/RNG, authority and resource gates; maximum authority error is `3.05425129631942e-12`. Every pair saves **601.5673828125 MiB** of requested structured storage, with unchanged solver workspace and **620 MiB** better L3/L4/L6 minimum-free checkpoints. L6 margin above 2 GiB becomes **699.125 MiB**; this is checkpoint evidence, not continuous-peak or larger-input qualification. Audit `PASS_RECOMPUTED`, installation `PASS_INSTALLED`, final closure `cdc26f74…81bfaa3`, manifest `196a0a84…e4a8c87c`. Installed native is now **`b2b79fc6…e135b12b`**. All 419 shared-host historical dependencies pass verification, with exactly one explicit old-live-native mapping to its frozen identical `a1e16a9c…7b73bd34` archive; old receipts/manifests and pending protocol remain unchanged. The current capacity version's isolated development median is **283.328 s**. Historical **290.491 s** stays bound to `c469ac5/e15be9d` and the old native; their difference is not a row-removal speedup. Source is uncommitted; evidence is a full-build parent plus one rebuilt TU, not clean committed producer, new real-data/final-PDAG qualification or promotion. Defaults, lanes/slots/postback/work-pair, q55 deferral, recover/L8 STOP, Phase 10 ACTIVE, candidate NOT_FROZEN, holdout SEALED and recommended=false remain unchanged. All own campaign/audit jobs have ended; no commit or push in this continuation.
 >
@@ -167,14 +213,25 @@ The final compatible route must reproduce the legacy CPU skeleton with **SHD = 0
 The guiding principle is:
 
 ```text
-First 0 SHD, then speed.
+First numerical and graph parity across inputs, then speed.
 ```
 
 ---
 
 ## 1. Hard correctness contract
 
-### 1.1 Canonical full-data gate
+Production support is defined by the statistical model, actual dimensions and
+bounded resources. A dataset identity, an exact benchmark row/column count or a
+captured target-count whitelist must not select optimization eligibility.
+Every optimization must validate multiple row counts and variable counts,
+different graph densities and nontrivial search depths. This includes numerical
+CI/pMax contracts, graph/order/RNG/resource checks and per-input OFF/ON results.
+An unsupported optimized kernel shape must use a qualified exact GPU path when
+available; it must not silently change the statistical model or use CPU numerical
+authority. Explicit model/capacity rejection remains valid when no qualified path
+exists. One dataset's speedup is not a product-wide performance guarantee.
+
+### 1.1 Canonical full-data regression
 
 For the canonical real benchmark:
 
@@ -186,7 +243,7 @@ reference edge count = 110
 reference n.edgetests = 2213,52659,125293,40694,13293,5422,835,80,9
 ```
 
-Every route proposed for compatible-CUDA promotion must satisfy:
+On this regression input, every route proposed for compatible-CUDA promotion must satisfy:
 
 ```text
 candidate edge count        = 110
