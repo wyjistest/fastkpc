@@ -1,0 +1,286 @@
+{
+  "schema": "fastkpc-public-reproduction-attestation-v1",
+  "date": "2026-11-12",
+  "status": "PASS_LOCAL_PUBLIC_REPRODUCTION_AND_RELOCATION",
+  "producer_commit": "2be6a816d3039a5f9340ba7018166d737ab11d9a",
+  "harness_git_head": "d7b0815e9e30719764651a8e7996fa1766328dd7",
+  "harness_identity": "uncommitted runtime snapshot; source and tool identities separated",
+  "build": {
+    "status": "PASS_CLEAN_FULL_BUILD",
+    "producer_commit": "2be6a816d3039a5f9340ba7018166d737ab11d9a",
+    "compile_count": 44,
+    "parent_objects_reused": false,
+    "native_sha256": "63dde57dd8607a4846ee75efb5bf2a737cba674654fbdf6821a66c7ab472d6b2",
+    "elapsed_sec": 2787.133076906204
+  },
+  "protocol_sha256": "535644da9a834b0447aecaa9ff3cf466c48cc3c4ef6a048505d7893910aaa0cb",
+  "environment": {
+    "platform": "Linux-5.15.0-46-generic-x86_64-with-glibc2.35",
+    "python": "3.11.10 (main, Sep  7 2024, 18:35:42) [GCC 9.4.0]",
+    "cpu_affinity": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19
+    ],
+    "selected_gpu": {
+      "index": "1",
+      "uuid": "GPU-9c6883e3-fe8f-1a96-ebac-c8496069cba2",
+      "name": "NVIDIA GeForce RTX 4090",
+      "compute_capability": "8.9",
+      "memory": "24564 MiB",
+      "driver": "555.42.06"
+    },
+    "gpu_inventory": [
+      [
+        "0",
+        " GPU-d1f5be95-b8a3-3c18-f919-90913038a1a3",
+        " NVIDIA GeForce RTX 4090",
+        " 8.9",
+        " 24564 MiB",
+        " 555.42.06"
+      ],
+      [
+        "1",
+        " GPU-9c6883e3-fe8f-1a96-ebac-c8496069cba2",
+        " NVIDIA GeForce RTX 4090",
+        " 8.9",
+        " 24564 MiB",
+        " 555.42.06"
+      ]
+    ],
+    "R": {
+      "R": "R version 4.4.1 (2024-06-14)",
+      "platform": "x86_64-pc-linux-gnu",
+      "R_home": "/usr/local/lib/R",
+      "package_versions": {
+        "Rcpp": "1.0.13",
+        "RcppArmadillo": "14.0.2.1",
+        "RcppEigen": "0.3.4.0.2",
+        "RSpectra": "0.16.2",
+        "pcalg": "2.7.12",
+        "graph": "1.84.1",
+        "RBGL": "1.82.0",
+        "mgcv": "1.9.1",
+        "Matrix": "1.7.0",
+        "energy": "1.7.12",
+        "kernlab": "0.9.33",
+        "jsonlite": "1.8.9",
+        "digest": "0.6.37"
+      },
+      "session_info": [
+        "R version 4.4.1 (2024-06-14)",
+        "Platform: x86_64-pc-linux-gnu",
+        "Running under: Ubuntu 20.04.6 LTS",
+        "",
+        "Matrix products: default",
+        "BLAS:   /usr/local/lib/R/lib/libRblas.so ",
+        "LAPACK: /usr/local/lib/R/lib/libRlapack.so;  LAPACK version 3.12.0",
+        "",
+        "locale:",
+        " [1] LC_CTYPE=C.UTF-8       LC_NUMERIC=C           LC_TIME=C.UTF-8       ",
+        " [4] LC_COLLATE=C.UTF-8     LC_MONETARY=C.UTF-8    LC_MESSAGES=C.UTF-8   ",
+        " [7] LC_PAPER=C.UTF-8       LC_NAME=C              LC_ADDRESS=C          ",
+        "[10] LC_TELEPHONE=C         LC_MEASUREMENT=C.UTF-8 LC_IDENTIFICATION=C   ",
+        "",
+        "time zone: Asia/Shanghai",
+        "tzcode source: system (glibc)",
+        "",
+        "attached base packages:",
+        "[1] stats     graphics  grDevices utils     datasets  methods   base     ",
+        "",
+        "loaded via a namespace (and not attached):",
+        " [1] nlme_3.1-164           corpcor_1.6.10         cli_3.6.3             ",
+        " [4] rlang_1.1.4            ggm_2.5.2              RBGL_1.82.0           ",
+        " [7] DEoptimR_1.2-0         jsonlite_1.8.9         clue_0.3-65           ",
+        "[10] energy_1.7-12          graph_1.84.1           stats4_4.4.1          ",
+        "[13] grid_4.4.1             fastICA_1.2-7          abind_1.4-8           ",
+        "[16] gsl_2.1-8              lifecycle_1.0.4        BiocManager_1.30.25   ",
+        "[19] cluster_2.1.6          compiler_4.4.1         RSpectra_0.16-2       ",
+        "[22] igraph_2.0.3           robustbase_0.99-7      Rcpp_1.0.13           ",
+        "[25] pkgconfig_2.0.3        mgcv_1.9-1             RcppEigen_0.3.4.0.2   ",
+        "[28] digest_0.6.37          kernlab_0.9-33         lattice_0.22-6        ",
+        "[31] splines_4.4.1          pcalg_2.7-12           magrittr_2.0.3        ",
+        "[34] Matrix_1.7-0           tools_4.4.1            RcppArmadillo_14.0.2-1",
+        "[37] boot_1.3-30            bdsmatrix_1.3-7        sfsmisc_1.1-24        ",
+        "[40] BiocGenerics_0.50.0   "
+      ],
+      "BLAS": "/usr/local/lib/R/lib/libRblas.so"
+    },
+    "CXX17": "g++",
+    "compiler_version": "g++ (Ubuntu 9.4.0-1ubuntu1~20.04.2) 9.4.0\nCopyright (C) 2019 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.",
+    "nvcc": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2024 NVIDIA Corporation\nBuilt on Thu_Jun__6_02:18:23_PDT_2024\nCuda compilation tools, release 12.5, V12.5.82\nBuild cuda_12.5.r12.5/compiler.34385749_0"
+  },
+  "cpu_model": "Intel Core i9-10900X, 10 cores / 20 threads",
+  "production_source_count": 217,
+  "frozen_file_count": 1478,
+  "runtime_tool_sha256": {
+    "tools/environment.R": "6b7fdd93816ab2c30595c94c94ffb60e26e981aec0e9fa6f326f443b611499b0",
+    "tools/reproduce.py": "fcbc7ea52a3f25881cdd5ad80d203ac8fd34a1d93722a33525e231e68bd1f184",
+    "tools/run.R": "81c427b304e92ebd62cb4d8771e1d2eafe67a73c7b8b103ebf0bf689f20b763c",
+    "tools/audit_receipts.R": "f925970de963764dc19ffb700f8c6f86f76656f1a7fcbb5bc713bb01b976e13c",
+    "tools/prepare.R": "c70268eb48ee609890abcc62ac529a34d5db3ff00a0b33197375db2696ad36cd"
+  },
+  "host_validation": {
+    "unittest_count": 7,
+    "status": "PASS",
+    "python_compile": "PASS",
+    "R_parse_count": 3,
+    "concurrent_resume_rejected": true,
+    "all_four_public_input_identities_match": true,
+    "historical_manifest_files_verified": 505,
+    "historical_manifest_sha256": "89306730984f8be645e14a2bbbbdca16598c31a530c956ff30411444763245a0",
+    "test_source_sha256": "cc6ae3686f08ca79375740f0db0f1244253295440d94264450c9a00a9262641b"
+  },
+  "input_manifest": {
+    "public500": {
+      "n": 500,
+      "p": 50,
+      "default_numCol": 50,
+      "path": "inputs/public500.rds",
+      "file_sha256": "efb81666e2cac91d14c5d0f951690cedf23b1626f4a06c281045e51ca5a38192",
+      "serialized_data_sha256": "2b17b36adb10f5defaf9f881b7635de8c559dd982f4577a60ed16e0f193560ac",
+      "fp64_column_major_sha256": "b72ab8921e23e5ccb8f2b55e902300010a15d9d49b8f14b6016e3eb9e28b1b2f"
+    },
+    "blocks256": {
+      "n": 256,
+      "p": 12,
+      "default_numCol": 25,
+      "path": "inputs/blocks256.rds",
+      "file_sha256": "c04cf4b9c1f13be1d09bc8243fb23de5d5c9af994da59e1a64391cde831b7ed5",
+      "serialized_data_sha256": "a11c3bf998c1b8cc1bf0aedfa75e8b52dd02fb1404e0e8eebe893363be78456d",
+      "fp64_column_major_sha256": "3a439269d002dd8575b36aaa6f4799cc7f985fac74e25f52f3b563170c895c83"
+    }
+  },
+  "summary": {
+    "status": "PASS_PUBLIC_INPUT_QUALIFICATION",
+    "producer_commit": "2be6a816d3039a5f9340ba7018166d737ab11d9a",
+    "native_sha256": "63dde57dd8607a4846ee75efb5bf2a737cba674654fbdf6821a66c7ab472d6b2",
+    "cases": [
+      "public500",
+      "blocks256"
+    ],
+    "correctness_runs": 4,
+    "timing_runs": 12,
+    "raw_receipt_runs": 16,
+    "ci_comparisons": 23096,
+    "orientation_ci_comparisons": 968,
+    "max_ci_error": 1.83623949379097e-13,
+    "max_pmax_error": 1.39110944985532e-13,
+    "rows": {
+      "public500": {
+        "off_outer_sec": [
+          25.053,
+          24.993,
+          25.059
+        ],
+        "on_outer_sec": [
+          25.734,
+          25.746,
+          25.791
+        ],
+        "off_median": 25.053,
+        "on_median": 25.746,
+        "ratio": 1.027661357921207,
+        "non_regression": true,
+        "speed": "NOT_PROVEN",
+        "stage_medians": {
+          "off": {
+            "skeleton_sec": 10.653,
+            "orientation_sec": 14.365
+          },
+          "on": {
+            "skeleton_sec": 11.075,
+            "orientation_sec": 14.649
+          }
+        }
+      },
+      "blocks256": {
+        "off_outer_sec": [
+          1.515,
+          1.518,
+          1.521
+        ],
+        "on_outer_sec": [
+          1.511,
+          1.521,
+          1.514
+        ],
+        "off_median": 1.518,
+        "on_median": 1.514,
+        "ratio": 0.997364953886693,
+        "non_regression": true,
+        "speed": "NOT_PROVEN",
+        "stage_medians": {
+          "off": {
+            "skeleton_sec": 0.265,
+            "orientation_sec": 1.226
+          },
+          "on": {
+            "skeleton_sec": 0.262,
+            "orientation_sec": 1.222
+          }
+        }
+      }
+    },
+    "all_inputs_non_regression": true,
+    "evidence_class": "fresh public-input development timing of two GPU configurations; not CPU-vs-GPU or promotion",
+    "phase10": "ACTIVE",
+    "candidate": "NOT_FROZEN",
+    "holdout": "SEALED",
+    "recommended": false
+  },
+  "evidence": {
+    "local_root": "/data/wenyujianData/fastkpc public repro 20261112",
+    "manifest_sha256": "3abe2ef088140a4c2423d0b1d18b49aa30636db015fdc76aff47a1eb9cbe1ad6",
+    "manifest_file_count": 1643,
+    "summary_sha256": "ded828f224a2fa013752ea78cafe41c84cc7c94a92c2834417de730db2f3d670",
+    "receipt_audit_sha256": "f517eac60df706a5d53c702da3572f7802729213f20c98eaaba783830d45a5d2",
+    "archive_path": "/data/wenyujianData/fastkpc-public-reproduction-20261112.tar.gz",
+    "archive_bytes": 233512223,
+    "archive_sha256": "66d49ffab55baa44b34e09988d34ef2891975ca715ef99caa3d5993ab2083fc7"
+  },
+  "relocation": {
+    "root": "/data/wenyujianData/fastkpc public relocated 20261112/public-reproduction",
+    "verification": "PASS; frozen driver, /usr/bin/python3, PATH=/nonexistent, trusted manifest SHA",
+    "files_verified": 1643,
+    "raw_receipt_audit": "PASS",
+    "raw_receipt_runs": 16,
+    "native_loaded": false,
+    "GPU_visibility": "",
+    "reaudit_path": "/data/wenyujianData/fastkpc-public-reaudit-20261112.json",
+    "reaudit_sha256": "f517eac60df706a5d53c702da3572f7802729213f20c98eaaba783830d45a5d2",
+    "audit_bytes_match": true
+  },
+  "unchanged": {
+    "original_kpcalg_sha256": "d0620dd9b06f006170b5e142b892c202619296797b2bf9ca842a7c2b5b3b715f",
+    "installed_native_sha256": "2727ef51899688b54da697d0008f99a4908922dbcacec1c30ed58cef09198301"
+  },
+  "boundaries": {
+    "real_inputs_rerun": false,
+    "dense500_dense1025_rerun": false,
+    "production_numerical_source_changed": false,
+    "third_party_rerun": false,
+    "CPU_vs_GPU_timing": false,
+    "phase10": "ACTIVE",
+    "candidate": "NOT_FROZEN",
+    "holdout": "SEALED",
+    "recommended": false
+  }
+}

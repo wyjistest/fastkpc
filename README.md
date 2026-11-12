@@ -23,6 +23,16 @@ three full WAN-PDAG timings, and do not establish a general GPU-vs-CPU speedup
 or promotion. Original `kpcalg/R` is restored; installed native
 `2727ef51…9198301` remains. See the [final evidence index](fastkpc/docs/PHASE10_CLEAN_GENERAL_INPUTS_ATTESTATION_20261112.json).
 
+The [public reproduction entry](fastkpc/tools/reproduce_public/README.md) builds
+the frozen producer in a separate checkout, generates public inputs, computes
+fresh original-R references and runs the A/C protocol without private data or
+historical binaries. It also packages relative-path evidence for independent
+hash verification and raw-receipt auditing after relocation.
+Its [local validation](fastkpc/docs/PHASE10_PUBLIC_REPRODUCTION_20261112.md)
+passes a new full build, 4 correctness and 12 timing runs, and relocation of
+1,643 evidence files. Both public inputs meet non-regression; neither proves
+speed. This does not replace the seven-input evidence above.
+
 Development priority was corrected on 2026-11-02: production optimizations must
 dispatch on model dimensions and resource capacity, with validation across
 multiple input shapes. The 351 x 48 input is one regression case. See the
@@ -108,7 +118,7 @@ skeleton <- fastkpc_compatible_cuda_skeleton(
 ```
 
 The strict end-to-end entrypoint keeps that CUDA skeleton and uses the original
-kpcalg implementation for the short WAN-PDAG orientation stage:
+kpcalg implementation for the CPU WAN-PDAG orientation stage:
 
 ```r
 result <- fastkpc_compatible_cuda_wanpdag(

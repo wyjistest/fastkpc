@@ -1,5 +1,19 @@
 # Full-CUDA Legacy-Compatible CI Goal Document
 
+> **2026-11-12 public reproduction entry — local validation COMPLETE:**
+> The [portable entry](fastkpc/tools/reproduce_public/README.md) independently
+> rebuilds producer `2be6a81` (44 objects, native `63dde57d…472d6b2`) and generates
+> fresh original-R references without private inputs or old natives. Public
+> 500x50 and block-correlated 256x12 pass 4 correctness and 12 timing runs:
+> 23,096 cumulative CI comparisons, maximum error `1.83624e-13`, all graph/RNG,
+> authority and resource gates. A/C medians are 25.053/25.746 and 1.518/1.514 s;
+> both meet non-regression, neither proves speed. A relocated public bundle
+> passes 1,643 file hashes and a 16-receipt audit without loading native.
+> This is same-machine reproduction and relocation, not an independent
+> third-party rerun, CPU-vs-GPU timing or promotion. Production sources,
+> original kpcalg, installed native and all Phase 10 states remain unchanged.
+> See the [report](fastkpc/docs/PHASE10_PUBLIC_REPRODUCTION_20261112.md).
+
 > **2026-11-12 clean multi-input closure — correctness PASS; repeated timing COMPLETE:**
 > Producer `2be6a81`, full-build native `d8793173…10d7350`, passes a clean
 > 44-object build, 14 correctness runs and 42 isolated timing runs on seven

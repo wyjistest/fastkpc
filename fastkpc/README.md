@@ -23,6 +23,17 @@ configurations with complete WAN-PDAG timing, not GPU-vs-CPU speedups or
 promotion. The [final evidence index](docs/PHASE10_CLEAN_GENERAL_INPUTS_ATTESTATION_20261112.json)
 binds the new closure; installed native remains `2727ef51…9198301`.
 
+The [public reproduction entry](tools/reproduce_public/README.md) builds the
+frozen producer in a separate checkout and runs public synthetic inputs with
+fresh original-R references, A/C timing and a raw-receipt audit. It requires no
+private datasets or historical binary. Its relative-path evidence bundle can
+be verified and audited after relocation; see the entry for environment and
+qualification boundaries.
+The [local validation](docs/PHASE10_PUBLIC_REPRODUCTION_20261112.md) passes a
+new full build, 4 correctness and 12 timing runs, and relocated verification
+of 1,643 files. Both public inputs meet non-regression; speed is NOT_PROVEN
+for both. The earlier seven-input evidence keeps its original identities.
+
 Runtime/tool commit `8d139b8` and the local native are linked in the
 [2026-11-06 source attestation](docs/PHASE10_SOURCE_ATTESTATION_20261106.json).
 It verifies 107 build inputs and 97 fastkpc R files against Git, and records the
