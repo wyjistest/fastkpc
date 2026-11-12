@@ -2,10 +2,26 @@
 
 Staged fast kPC backend for this workspace.
 
-This directory is separate from `kpcalg/R`. This Git handoff preserves the
-original legacy reference. A local `dcov.gamma` scalar-diagonal correction used
-in the 2026-11-06 qualification remains uncommitted; the report retains its
-source identity and distinguishes it from the original R reference.
+This directory is separate from `kpcalg/R`. The original legacy reference has
+been restored in the main workspace. The scalar-diagonal correction used in
+the earlier 2026-11-06 local qualification is now only an archived fixture;
+its original receipts retain the patched R source identity.
+
+The [clean-checkout qualification and repeated timing](docs/PHASE10_CLEAN_GENERAL_INPUTS_20261106.md)
+of committed producer `2be6a81` use full-build native `d8793173…10d7350`:
+44 rebuilt objects, seven complete inputs, 14 correctness runs and 42 isolated
+timing runs against fresh unmodified R references. All 63,056 CI comparisons
+(maximum error `1.83624e-13`), 146,576 orientation CI checks, final PDAG/RNG,
+authority and resource gates pass, including actual defaults on 500x50 and
+1025x4. The November 12 audit independently rechecks all 56 raw receipts.
+
+All seven inputs meet the predeclared outer non-regression gate (ON/OFF median
+<=1.05). Only real 300x10 meets the speed gate: **3.353/2.893 seconds**, a 13.72%
+decrease. Public 500x50 is **24.986/25.265 seconds**; speed remains `NOT_PROVEN`
+for the other six inputs. These are per-input, three-run medians of two GPU
+configurations with complete WAN-PDAG timing, not GPU-vs-CPU speedups or
+promotion. The [final evidence index](docs/PHASE10_CLEAN_GENERAL_INPUTS_ATTESTATION_20261112.json)
+binds the new closure; installed native remains `2727ef51…9198301`.
 
 Runtime/tool commit `8d139b8` and the local native are linked in the
 [2026-11-06 source attestation](docs/PHASE10_SOURCE_ATTESTATION_20261106.json).
@@ -27,7 +43,7 @@ complete canonical regression. Three complete real inputs use default ranks
 17/24/30; the public 500x50 WAN-PDAG entry uses default 50. The prior
 `476ad65e…5e5a37b` twelve-input / 72-run evidence used explicit rank 35: its
 two workload speedups and 3.8% public-500x50 regression keep that historical
-scope. Switches remain opt-in; this correction establishes no new speed median.
+scope. Switches remain opt-in; that earlier correction established no new speed median.
 
 For the preceding runtime's committed source and historical evidence, see the
 [2026-10-30 development handoff](docs/PHASE10_DEVELOPMENT_HANDOFF_20261030.md).

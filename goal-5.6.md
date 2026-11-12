@@ -1,5 +1,24 @@
 # Full-CUDA Legacy-Compatible CI Goal Document
 
+> **2026-11-12 clean multi-input closure — correctness PASS; repeated timing COMPLETE:**
+> Producer `2be6a81`, full-build native `d8793173…10d7350`, passes a clean
+> 44-object build, 14 correctness runs and 42 isolated timing runs on seven
+> complete inputs. Independent inspection of all 56 raw receipts confirms
+> 63,056 CI comparisons (maximum error `1.83623949379097e-13`), 146,576
+> orientation CI checks, final PDAG/RNG, authority and resource gates.
+> 500×50 uses default rank 50; 1025×4 uses default 102 and dense CUDA;
+> dense500 reaches L6 with actual L3–L6 slot use. The November 10 timings
+> satisfy predeclared outer non-regression (C/A <=1.05) on all seven inputs.
+> Only real 300×10 proves speed under the declared gate: **3.353/2.893 s**
+> (13.72% decrease); public 500×50 is **24.986/25.265 s**, and the other six
+> inputs are `NOT_PROVEN`. A/C are two GPU configurations with three repeats
+> each, not a GPU-vs-CPU comparison or formal promotion. Stage medians are
+> reported separately; no pooled multi-input speedup is claimed.
+> Original `kpcalg/R`, the old closure identities, installed native
+> `2727ef51…9198301`, Phase 10 ACTIVE, candidate NOT_FROZEN, holdout SEALED and
+> recommended=false remain unchanged. See the [report](fastkpc/docs/PHASE10_CLEAN_GENERAL_INPUTS_20261106.md)
+> and [final evidence index](fastkpc/docs/PHASE10_CLEAN_GENERAL_INPUTS_ATTESTATION_20261112.json).
+
 > **2026-11-06 Git handoff:** Runtime/tools are committed as `8d139b8`.
 > [Source attestation](fastkpc/docs/PHASE10_SOURCE_ATTESTATION_20261106.json)
 > matches 107 production build inputs and 97 fastkpc R dependencies to Git,

@@ -1,0 +1,364 @@
+{
+  "schema_version": "fastkpc-clean-original-reference-qualification-attestation-v1",
+  "status": "PASS_CLEAN_ORIGINAL_REFERENCE_QUALIFICATION",
+  "audited_utc": "2026-11-12T04:16:50.268263+00:00",
+  "producer_commit": "2be6a816d3039a5f9340ba7018166d737ab11d9a",
+  "native_sha256": "d8793173b00c89d971f9210ae4f7020f7bef786dab5e48ec43dfc8fc310d7350",
+  "installed_native_sha256": "2727ef51899688b54da697d0008f99a4908922dbcacec1c30ed58cef09198301",
+  "main_installation_replaced": false,
+  "legacy_r_sha256": "d0620dd9b06f006170b5e142b892c202619296797b2bf9ca842a7c2b5b3b715f",
+  "source_count": 217,
+  "object_count": 44,
+  "input_count": 7,
+  "qualification_gpu_runs": 14,
+  "timing_gpu_runs": 42,
+  "fresh_original_cpu_ci_count": 7882,
+  "gpu_ci_comparisons": 63056,
+  "orientation_ci_comparisons": 146576,
+  "max_ci_error": 1.83623949379097e-13,
+  "max_pmax_error": 1.44911860289199e-13,
+  "rows": {
+    "real179": {
+      "n": 179,
+      "p": 8,
+      "numCol": 17,
+      "ci_count": 320,
+      "original_cpu_ci_count": 320,
+      "orientation_ci_count": 0,
+      "max_level": 3,
+      "max_ci_error": 5.96189764223709e-14,
+      "max_pmax_error": 5.96189764223709e-14,
+      "off_outer_sec": [
+        1.087,
+        1.04,
+        1.035
+      ],
+      "on_outer_sec": [
+        1.05,
+        1.077,
+        1.053
+      ],
+      "off_outer_median": 1.04,
+      "on_outer_median": 1.053,
+      "stage_medians": {
+        "off": {
+          "skeleton_sec": 1.009,
+          "orientation_sec": 0.00300000000000011
+        },
+        "on": {
+          "skeleton_sec": 1.019,
+          "orientation_sec": 0.00300000000000011
+        }
+      },
+      "outer_ratio": 1.0125,
+      "non_regression": true,
+      "speed": "NOT_PROVEN",
+      "slowest_on_below_fastest_off": false,
+      "raw_pcalg_call_order_exact": false
+    },
+    "real243": {
+      "n": 243,
+      "p": 9,
+      "numCol": 24,
+      "ci_count": 413,
+      "original_cpu_ci_count": 413,
+      "orientation_ci_count": 7,
+      "max_level": 4,
+      "max_ci_error": 8.79296635503124e-14,
+      "max_pmax_error": 8.79296635503124e-14,
+      "off_outer_sec": [
+        2.081,
+        2.096,
+        2.164
+      ],
+      "on_outer_sec": [
+        2.023,
+        2.058,
+        2.028
+      ],
+      "off_outer_median": 2.096,
+      "on_outer_median": 2.028,
+      "stage_medians": {
+        "off": {
+          "skeleton_sec": 1.726,
+          "orientation_sec": 0.343
+        },
+        "on": {
+          "skeleton_sec": 1.661,
+          "orientation_sec": 0.340000000000002
+        }
+      },
+      "outer_ratio": 0.9675572519083969,
+      "non_regression": true,
+      "speed": "NOT_PROVEN",
+      "slowest_on_below_fastest_off": true,
+      "raw_pcalg_call_order_exact": false
+    },
+    "real300": {
+      "n": 300,
+      "p": 10,
+      "numCol": 30,
+      "ci_count": 655,
+      "original_cpu_ci_count": 655,
+      "orientation_ci_count": 2,
+      "max_level": 4,
+      "max_ci_error": 1.44911860289199e-13,
+      "max_pmax_error": 1.44911860289199e-13,
+      "off_outer_sec": [
+        3.353,
+        3.408,
+        3.299
+      ],
+      "on_outer_sec": [
+        2.93,
+        2.835,
+        2.893
+      ],
+      "off_outer_median": 3.353,
+      "on_outer_median": 2.893,
+      "stage_medians": {
+        "off": {
+          "skeleton_sec": 3.096,
+          "orientation_sec": 0.232999999999999
+        },
+        "on": {
+          "skeleton_sec": 2.631,
+          "orientation_sec": 0.233000000000001
+        }
+      },
+      "outer_ratio": 0.8628094243960631,
+      "non_regression": true,
+      "speed": "PROVEN",
+      "slowest_on_below_fastest_off": true,
+      "raw_pcalg_call_order_exact": false
+    },
+    "public500": {
+      "n": 500,
+      "p": 50,
+      "numCol": 50,
+      "ci_count": 2789,
+      "original_cpu_ci_count": 2789,
+      "orientation_ci_count": 89,
+      "max_level": 3,
+      "max_ci_error": 1.83623949379097e-13,
+      "max_pmax_error": 1.39110944985532e-13,
+      "off_outer_sec": [
+        24.949,
+        25.037,
+        24.986
+      ],
+      "on_outer_sec": [
+        25.27,
+        25.265,
+        25.248
+      ],
+      "off_outer_median": 24.986,
+      "on_outer_median": 25.265,
+      "stage_medians": {
+        "off": {
+          "skeleton_sec": 10.593,
+          "orientation_sec": 14.36
+        },
+        "on": {
+          "skeleton_sec": 11.001,
+          "orientation_sec": 14.235
+        }
+      },
+      "outer_ratio": 1.011166253101737,
+      "non_regression": true,
+      "speed": "NOT_PROVEN",
+      "slowest_on_below_fastest_off": false,
+      "raw_pcalg_call_order_exact": false
+    },
+    "dense500": {
+      "n": 500,
+      "p": 8,
+      "numCol": 50,
+      "ci_count": 3559,
+      "original_cpu_ci_count": 3559,
+      "orientation_ci_count": 18000,
+      "max_level": 6,
+      "max_ci_error": 7.86176679312689e-15,
+      "max_pmax_error": 7.86176679312689e-15,
+      "off_outer_sec": [
+        2798.063,
+        2801.699,
+        2795.757
+      ],
+      "on_outer_sec": [
+        2797.989,
+        2793.845,
+        2797.599
+      ],
+      "off_outer_median": 2798.063,
+      "on_outer_median": 2797.599,
+      "stage_medians": {
+        "off": {
+          "skeleton_sec": 14.362,
+          "orientation_sec": 2784.555
+        },
+        "on": {
+          "skeleton_sec": 11.146,
+          "orientation_sec": 2786.425
+        }
+      },
+      "outer_ratio": 0.9998341709961499,
+      "non_regression": true,
+      "speed": "NOT_PROVEN",
+      "slowest_on_below_fastest_off": false,
+      "raw_pcalg_call_order_exact": false
+    },
+    "blocks256": {
+      "n": 256,
+      "p": 12,
+      "numCol": 25,
+      "ci_count": 98,
+      "original_cpu_ci_count": 98,
+      "orientation_ci_count": 32,
+      "max_level": 1,
+      "max_ci_error": 1.80966353013901e-14,
+      "max_pmax_error": 1.80966353013901e-14,
+      "off_outer_sec": [
+        1.508,
+        1.495,
+        1.496
+      ],
+      "on_outer_sec": [
+        1.488,
+        1.501,
+        1.493
+      ],
+      "off_outer_median": 1.496,
+      "on_outer_median": 1.493,
+      "stage_medians": {
+        "off": {
+          "skeleton_sec": 0.267,
+          "orientation_sec": 1.21
+        },
+        "on": {
+          "skeleton_sec": 0.267,
+          "orientation_sec": 1.206
+        }
+      },
+      "outer_ratio": 0.9979946524064172,
+      "non_regression": true,
+      "speed": "NOT_PROVEN",
+      "slowest_on_below_fastest_off": false,
+      "raw_pcalg_call_order_exact": false
+    },
+    "dense1025": {
+      "n": 1025,
+      "p": 4,
+      "numCol": 102,
+      "ci_count": 48,
+      "original_cpu_ci_count": 48,
+      "orientation_ci_count": 192,
+      "max_level": 2,
+      "max_ci_error": 3.35945371476414e-45,
+      "max_pmax_error": 3.35945371476414e-45,
+      "off_outer_sec": [
+        231.082,
+        230.574,
+        230.835
+      ],
+      "on_outer_sec": [
+        231.239,
+        231.292,
+        230.924
+      ],
+      "off_outer_median": 230.835,
+      "on_outer_median": 231.239,
+      "stage_medians": {
+        "off": {
+          "skeleton_sec": 1.367,
+          "orientation_sec": 229.455
+        },
+        "on": {
+          "skeleton_sec": 1.335,
+          "orientation_sec": 229.884
+        }
+      },
+      "outer_ratio": 1.001750167868824,
+      "non_regression": true,
+      "speed": "NOT_PROVEN",
+      "slowest_on_below_fastest_off": false,
+      "raw_pcalg_call_order_exact": false
+    }
+  },
+  "all_inputs_non_regression": true,
+  "speed_proven_inputs": [
+    "real300"
+  ],
+  "timing_started_utc": "2026-11-10T01:51:23.619136+00:00",
+  "timing_completed_utc": "2026-11-10T07:06:38.206994+00:00",
+  "timing_campaign_wall_sec": 18914.587857723236,
+  "timing_machine_isolated_runs": 42,
+  "performance_state": "COMPLETED_PER_INPUT_DEVELOPMENT_TIMING",
+  "raw_receipt_audit": {
+    "path": "closure1/receipt_audit.json",
+    "sha256": "c020792233748094ca0c5b3e3ad9c7303947b7d544cc9c48a73a08a69a8ba2c4",
+    "run_count": 56,
+    "native_loaded": false
+  },
+  "canonical_ci_count": 240498,
+  "method_ci_count": 792,
+  "method_max_error": 3.1863400806742e-14,
+  "rank_one_original_reference_supported": false,
+  "rank_one_isolated_fixture_pass": true,
+  "rejected_harness_attempts": {
+    "supplement1": "missing prepared_s shard in clean checkout; no numerical result from failed job",
+    "supplement2": "missing historical ABI contract manifests; failed run not accepted",
+    "supplement3": "rank-one harness omitted explicit full_cuda route; authority gate rejected legacy execution"
+  },
+  "phase10": "ACTIVE",
+  "candidate": "NOT_FROZEN",
+  "holdout": "SEALED",
+  "recommended": false,
+  "evidence_class": "clean producer/full build, fresh unmodified original-R correctness and per-input development timing; not promotion",
+  "canonical_gate_count": 34,
+  "canonical_gates_pass": true,
+  "closure": {
+    "path": "fastkpc/artifacts/full_cuda_ci/clean_general_inputs_20261106/closure1",
+    "summary_sha256": "fa72661739dc92d61a5cd6c6000e679ba2da65bba7ea602afd49055199aad7e7",
+    "manifest_sha256": "89306730984f8be645e14a2bbbbdca16598c31a530c956ff30411444763245a0",
+    "evidence_file_count": 505,
+    "manifest_hash_recheck": "PASS"
+  },
+  "original_correctness_closure": {
+    "attestation": "fastkpc/docs/PHASE10_CLEAN_GENERAL_INPUTS_ATTESTATION_20261106.json",
+    "path": "fastkpc/artifacts/full_cuda_ci/clean_general_inputs_20261106/correctness_closure1",
+    "summary_sha256": "6ecbacd1ed31a0384ec2a87bbe3124203f683b3fbb9a6c5693762f3cddca4e97",
+    "manifest_sha256": "5bdbd0018da12d686e4272f7795871d952588e22dd7a6a249867d2c5e1084b66",
+    "evidence_file_count": 275,
+    "unchanged": true
+  },
+  "performance_contract": {
+    "comparison": "two GPU configurations; not CPU vs GPU",
+    "primary_boundary": "complete public WAN-PDAG; separate skeleton and original CPU orientation",
+    "repeats_per_mode_per_input": 3,
+    "order": [
+      "A1",
+      "C1",
+      "C2",
+      "A2",
+      "A3",
+      "C3"
+    ],
+    "non_regression_ratio": 1.05,
+    "speed_ratio": 0.95,
+    "speed_requires_slowest_on_below_fastest_off": true,
+    "cross_input_speedup_pooled": false,
+    "promotion": false
+  },
+  "minimum_pool_free_checkpoint_bytes": 7192903680,
+  "limitations": [
+    "Development evidence covers the seven frozen inputs; no universal shape or speed guarantee.",
+    "Only real300 passes the predeclared complete-call speed gate; the other six inputs remain NOT_PROVEN.",
+    "Stage medians are not an additive decomposition of one complete call.",
+    "GPU process isolation and memory checkpoints retain their sampling/checkpoint evidence boundary.",
+    "Original R rank-one orientation remains unqualified; the patched function is an isolated fixture only.",
+    "Native, real inputs and large receipts remain local; the main installation was not replaced.",
+    "Previous closures and per-stage harness snapshots retain their original identities.",
+    "Phase 10 performance promotion, candidate freeze, holdout release and route recommendation remain incomplete."
+  ]
+}

@@ -6,6 +6,23 @@ backend work in one workspace. The active fast backend code is under
 
 ## Full-CUDA compatible skeleton and WAN-PDAG candidate
 
+The [clean-checkout qualification and repeated timing](fastkpc/docs/PHASE10_CLEAN_GENERAL_INPUTS_20261106.md)
+use committed producer `2be6a81` and full-build native `d8793173…10d7350`.
+All 44 objects were rebuilt. Seven full inputs, including three real datasets,
+500x50 at default rank 50 and 1025x4 at default rank 102, pass 14 correctness
+and 42 isolated timing runs against fresh unmodified R references. All 63,056
+CI comparisons (maximum error `1.83624e-13`), 146,576 orientation CI checks,
+final PDAG/RNG, authority and resource gates pass. The November 12 independent
+audit rechecks all 56 raw receipts and seals their identities.
+
+All seven inputs meet the predeclared outer non-regression gate (ON/OFF median
+<=1.05). Only real 300x10 meets the speed gate: **3.353/2.893 seconds** (13.72%
+less elapsed time). Public 500x50 is **24.986/25.265 seconds**; the other six
+inputs are speed `NOT_PROVEN`. These compare two GPU configurations, each with
+three full WAN-PDAG timings, and do not establish a general GPU-vs-CPU speedup
+or promotion. Original `kpcalg/R` is restored; installed native
+`2727ef51…9198301` remains. See the [final evidence index](fastkpc/docs/PHASE10_CLEAN_GENERAL_INPUTS_ATTESTATION_20261112.json).
+
 Development priority was corrected on 2026-11-02: production optimizations must
 dispatch on model dimensions and resource capacity, with validation across
 multiple input shapes. The 351 x 48 input is one regression case. See the
@@ -16,16 +33,17 @@ also removes the fixed `numCol=35` requirement. Qualified development native
 complete real inputs and the actual 500x50 default rank 50, plus other-method
 and complete canonical regressions. The previous `476ad65e…5e5a37b` twelve-input /
 72-run evidence retains its explicit rank-35 scope. Speed depends on workload;
-switches remain opt-in and no new performance median is claimed. Historical
+switches remain opt-in. That earlier qualification established no new performance median. Historical
 timings below retain their original input and binary scope.
 
-The Git handoff preserves the original `kpcalg/R` reference. The November 6 local
+The Git handoff preserves the original `kpcalg/R` reference. The earlier November 6 local
 qualification used a separate, uncommitted scalar-diagonal correction in
 `dcov.gamma`; its receipts retain that R source identity. Rank-one GPU results
 were checked against independent CPU full eig and the patched R function, not
 the original R function, which errors at that rank. Rank-one CPU-authority
-orientation remains unqualified with the original R reference. See the rank
-report for this reproducibility boundary.
+orientation remains unqualified with the original R reference. That patch is
+now retained only as an archived fixture; see the rank report for its historical
+reproducibility boundary.
 
 Runtime/tool commit `8d139b8` is bound to the local native by the
 [November 6 source attestation](fastkpc/docs/PHASE10_SOURCE_ATTESTATION_20261106.json):
